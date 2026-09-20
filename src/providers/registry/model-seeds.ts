@@ -6,6 +6,7 @@ import type { ProviderModelDiscoverySpec } from "./types";
 // devlog/_plan/260710_provider_hardening/001_research_frontier.md.
 // 260902 Claude Fable 5.1 (`claude-fable-5-1`): 1M context / 128K output / adaptive thinking
 // always on, per the official models overview and pricing page (platform.claude.com).
+export const BEDROCK_MODELS = ["zai.glm-5", "anthropic.claude-3-5-sonnet-20241022-v2:0", "anthropic.claude-3-5-haiku-20241022-v1:0", "meta.llama3-1-70b-instruct-v1:0", "amazon.nova-pro-v1:0"];
 export const ANTHROPIC_MODELS = ["claude-fable-5-1", "claude-fable-5", "claude-sonnet-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"];
 export const ANTHROPIC_MODEL_CONTEXT_WINDOWS: Record<string, number> = { "claude-fable-5-1": 1_000_000, "claude-sonnet-5": 1_000_000, "claude-fable-5": 1_000_000, "claude-opus-5": 1_000_000, "claude-opus-4-8": 1_000_000, "claude-opus-4-7": 1_000_000, "claude-opus-4-6": 1_000_000, "claude-sonnet-4-6": 1_000_000, "claude-haiku-4-5": 200_000 };
 // All seeded Claude models support vision: https://platform.claude.com/docs/en/models/overview

@@ -15,6 +15,7 @@ import { COMMAND_CODE_MODEL_REASONING_EFFORTS } from "../command-code-efforts";
 import { isCanonicalOpenRouterTarget } from "../openrouter-routing";
 import type { ProviderRegistryEntry } from "./types";
 import {
+  BEDROCK_MODELS,
   ANTHROPIC_MODELS,
   ANTHROPIC_MODEL_CONTEXT_WINDOWS,
   ANTHROPIC_MODEL_INPUT_MODALITIES,
@@ -85,6 +86,15 @@ import {
 } from "./model-seeds";
 
 export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
+  {
+    id: "amazon-bedrock",
+    label: "AWS Bedrock",
+    baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+    adapter: "bedrock",
+    authKind: "key",
+    dashboardUrl: "https://console.aws.amazon.com/bedrock/home",
+    models: BEDROCK_MODELS,
+  },
   {
     id: "openai",
     label: "OpenAI (Codex login)",

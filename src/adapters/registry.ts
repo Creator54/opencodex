@@ -1,4 +1,5 @@
 import { createAnthropicAdapter } from "./anthropic";
+import { createBedrockAdapter } from "./bedrock";
 import { createAzureAdapter } from "./azure";
 import type { ProviderAdapter } from "./base";
 import { withClinePassDeepSeekV4ToolReplayCompatibility } from "./cline-pass-deepseek-v4-tool-replay";
@@ -43,7 +44,8 @@ export type AdapterWire =
   | "google"
   | "kiro"
   | "cursor"
-  | "devin";
+  | "devin"
+  | "bedrock";
 
 export type AdapterMutationContract =
   | "codex-owned"
@@ -69,6 +71,11 @@ type InheritedAdapterDefinition = {
 type AdapterDefinition = DirectAdapterDefinition | InheritedAdapterDefinition;
 
 export const ADAPTER_REGISTRY = {
+  bedrock: {
+    wire: "bedrock",
+    mutation: "codex-owned",
+    create: (provider: OcxProviderConfig, _context: AdapterFactoryContext) => createBedrockAdapter(provider),
+  },
   codebuddy: {
     wire: "codebuddy",
     mutation: "codex-owned",
