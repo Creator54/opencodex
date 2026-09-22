@@ -136,8 +136,9 @@ import { resolveCopilotApiBaseUrl } from "../../oauth/github-copilot";
 import {
   GENERIC_OAUTH_MAX_FAILOVERS_PER_REQUEST,
   isGenericOAuthFailoverEnabled,
-  rotateGenericOAuthAccountOn429,
+  rotateGenericOAuthAccountOnFailure,
   failoverAccountSnapshot,
+  isRetriableFailoverStatus,
 } from "../../oauth/generic-account-failover";
 import { captureCodexAffinityDiagnostic } from "../../codex/affinity-debug";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "../../codex/catalog/native-models";
@@ -1194,7 +1195,7 @@ export async function preparePassthroughExchange(
     // Native Responses returns before the generic adapter's OAuth rotation loop. Keep
     // the same quorum, cooldown and request budget here, before any client bytes flow.
    if (
-     upstreamResponse.status === 429
+     isRetriableFailoverStatus(upstreamResponse.status)
       // Not a provider rate limit when this proxy synthesized it for a refused reset
       // replay; rotating accounts on it would re-send an inference that may already
       // have run and would cool down an account that refused nothing.
@@ -1212,7 +1213,8 @@ export async function preparePassthroughExchange(
         true,
       );
       if (hop.allowed) {
-        const nextAccountId = rotateGenericOAuthAccountOn429(
+        console.warn(`[opencodex] ${route.providerName} returned HTTP ${upstreamResponse.status}; failing over to next available account (attempt ${transportState.genericFailovers + 1})`);
+        const nextAccountId = rotateGenericOAuthAccountOnFailure(
           config, route.providerName, transportState.genericFailoverAccountId,
           upstreamResponse.headers.get("retry-after"),
           Date.now(),

@@ -38,6 +38,14 @@ import { sweepExpiredOnWrite } from "../lib/state-store-sweeper";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 
 /** Cap same-request rotations so a short Retry-After cannot spin. Mirrors the Anthropic bound. */
+
+/**
+ * Whether an upstream HTTP status code should trigger a generic OAuth account rotation.
+ */
+export function isRetriableFailoverStatus(status: number): boolean {
+  return status >= 400 && status <= 599;
+}
+
 export const GENERIC_OAUTH_MAX_FAILOVERS_PER_REQUEST = 3;
 
 const DEFAULT_COOLDOWN_MS = 60_000;
@@ -308,7 +316,7 @@ export function noteGenericPoolSelection(
  * Returns the id only; the caller mints the credential so a failed refresh does not leave the
  * cooldown applied to an account we then could not use.
  */
-export function rotateGenericOAuthAccountOn429(
+export function rotateGenericOAuthAccountOnFailure(
   config: OcxConfig,
   providerName: string,
   failedAccountId: string,

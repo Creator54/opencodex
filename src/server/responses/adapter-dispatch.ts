@@ -54,8 +54,9 @@ import {
 import {
   GENERIC_OAUTH_MAX_FAILOVERS_PER_REQUEST,
   isGenericOAuthFailoverEnabled,
-  rotateGenericOAuthAccountOn429,
+  rotateGenericOAuthAccountOnFailure,
   failoverAccountSnapshot,
+  isRetriableFailoverStatus,
 } from "../../oauth/generic-account-failover";
 import {
   attemptOpaqueBlobRecovery,
@@ -784,7 +785,7 @@ export async function prepareAdapterExchange(
       // Anthropic are excluded by isGenericFailoverProvider: their pools own quota scopes,
       // probe leases and affinity that this must not reimplement.
       while (
-        upstreamResponse.status === 429
+        isRetriableFailoverStatus(upstreamResponse.status)
         && transportState.genericFailoverAccountId
         && transportState.genericFailovers < GENERIC_OAUTH_MAX_FAILOVERS_PER_REQUEST
         && isGenericOAuthFailoverEnabled(config, route.providerName)
@@ -812,7 +813,8 @@ export async function prepareAdapterExchange(
           !adapterOwnsDispatch && transientRetryPolicyFor(route.provider) !== null,
         );
         if (!hop.allowed) break;
-        const nextAccountId = rotateGenericOAuthAccountOn429(
+        console.warn(`[opencodex] ${route.providerName} returned HTTP ${upstreamResponse.status}; failing over to next available account (attempt ${transportState.genericFailovers + 1})`);
+        const nextAccountId = rotateGenericOAuthAccountOnFailure(
           config,
           route.providerName,
           transportState.genericFailoverAccountId,

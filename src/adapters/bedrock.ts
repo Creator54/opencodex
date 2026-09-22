@@ -101,6 +101,58 @@ async function signV4(
 }
 
 // --- Adapter Implementation ---
+
+function sanitizeSchema(schema: any): any {
+  if (!schema || typeof schema !== "object") return schema;
+  if (Array.isArray(schema)) return schema.map(sanitizeSchema);
+
+  const cleaned = { ...schema };
+
+  if (cleaned.anyOf) {
+    const valid = cleaned.anyOf.filter((x: any) => x && x.type && x.type !== "null");
+    if (valid.length > 0) Object.assign(cleaned, sanitizeSchema(valid[0]));
+    delete cleaned.anyOf;
+  }
+  if (cleaned.allOf) {
+    const valid = cleaned.allOf.filter((x: any) => x && x.type && x.type !== "null");
+    if (valid.length > 0) Object.assign(cleaned, sanitizeSchema(valid[0]));
+    delete cleaned.allOf;
+  }
+  if (cleaned.oneOf) {
+    const valid = cleaned.oneOf.filter((x: any) => x && x.type && x.type !== "null");
+    if (valid.length > 0) Object.assign(cleaned, sanitizeSchema(valid[0]));
+    delete cleaned.oneOf;
+  }
+
+  if (cleaned.properties || cleaned.additionalProperties) {
+    if (!cleaned.type) cleaned.type = "object";
+  }
+
+  if (cleaned.type === "array") {
+    if (!cleaned.items) {
+      cleaned.items = { type: "string" };
+    } else {
+      cleaned.items = sanitizeSchema(cleaned.items);
+      if (!cleaned.items.type && cleaned.items.properties) {
+        cleaned.items.type = "object";
+      } else if (!cleaned.items.type) {
+        cleaned.items.type = "string";
+      }
+    }
+  } else if (cleaned.type === "object" || cleaned.properties) {
+    if (cleaned.properties) {
+      for (const k of Object.keys(cleaned.properties)) {
+        cleaned.properties[k] = sanitizeSchema(cleaned.properties[k]);
+      }
+    }
+    if (cleaned.additionalProperties && typeof cleaned.additionalProperties === "object") {
+      cleaned.additionalProperties = sanitizeSchema(cleaned.additionalProperties);
+    }
+  }
+
+  return cleaned;
+}
+
 export function createBedrockAdapter(provider: OcxProviderConfig & { region?: string }): ProviderAdapter {
   return {
     name: "bedrock",
@@ -126,7 +178,7 @@ export function createBedrockAdapter(provider: OcxProviderConfig & { region?: st
           toolSpec: {
             name: t.name,
             description: t.description || "",
-            inputSchema: { json: t.parameters },
+            inputSchema: { json: sanitizeSchema(t.parameters) },
           }
         })),
         ...(bedrockToolChoice ? { toolChoice: bedrockToolChoice } : {})

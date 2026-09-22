@@ -41,8 +41,9 @@ import {
 import {
   GENERIC_OAUTH_MAX_FAILOVERS_PER_REQUEST,
   isGenericOAuthFailoverEnabled,
-  rotateGenericOAuthAccountOn429,
+  rotateGenericOAuthAccountOnFailure,
   failoverAccountSnapshot,
+  isRetriableFailoverStatus,
 } from "../../oauth/generic-account-failover";
 import { shouldAttemptImageTierRetry } from "../image-retry";
 import { readDisplaySafeErrorText, normalizeUpstreamErrorText } from "./core-errors";
@@ -402,7 +403,7 @@ export function createAdapterContinuations(
       // two sidecars already produced once. Request-local state is shared with the other arms so
       // the per-request bound cannot be silently re-armed by reaching a different loop.
      if (
-       response.status === 429
+       isRetriableFailoverStatus(response.status)
        && transportState.genericFailoverAccountId
         && !isNonReplayableResponse(response)
        && transportState.genericFailovers < GENERIC_OAUTH_MAX_FAILOVERS_PER_REQUEST
@@ -421,8 +422,9 @@ export function createAdapterContinuations(
           `${route.providerName}|${route.modelId}|continuation-oauth-429`,
           !adapterOwnsDispatch && transientRetryPolicyFor(route.provider) !== null,
         );
+        if (hop.allowed) console.warn(`[opencodex] ${route.providerName} returned HTTP ${response.status}; failing over to next available account (attempt ${transportState.genericFailovers + 1})`);
         const nextAccountId = hop.allowed
-          ? rotateGenericOAuthAccountOn429(
+          ? rotateGenericOAuthAccountOnFailure(
             config,
             route.providerName,
             transportState.genericFailoverAccountId,

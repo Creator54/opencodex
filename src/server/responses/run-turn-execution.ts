@@ -24,8 +24,9 @@ import { SendBudgetExhaustedError } from "../../lib/upstream-retry";
 import {
   GENERIC_OAUTH_MAX_FAILOVERS_PER_REQUEST,
   isGenericOAuthFailoverEnabled,
-  rotateGenericOAuthAccountOn429,
+  rotateGenericOAuthAccountOnFailure,
   failoverAccountSnapshot,
+  isRetriableFailoverStatus,
 } from "../../oauth/generic-account-failover";
 import { resolveWireProtocolOverride } from "../adapter-resolve";
 import { formatErrorResponse, bridgeToResponsesSSE, buildResponseJSON } from "../../bridge";
@@ -238,7 +239,7 @@ export async function executeResponsesRunTurn(
       if (error.code === SEND_BUDGET_EXHAUSTED_CODE) return false;
       const status = error.status ?? adapterFailureFromMessage(error.message).httpStatus;
       if (
-        status !== 429
+        !isRetriableFailoverStatus(status)
         || !transportState.genericFailoverAccountId
         || transportState.genericFailovers >= GENERIC_OAUTH_MAX_FAILOVERS_PER_REQUEST
         || !isGenericOAuthFailoverEnabled(config, route.providerName)
@@ -260,7 +261,8 @@ export async function executeResponsesRunTurn(
         noteAttemptRecoveryWithheld(logCtx.activeAttempt, "rotation-send-budget");
         return false;
       }
-      const nextAccountId = rotateGenericOAuthAccountOn429(
+      console.warn(`[opencodex] ${route.providerName} returned HTTP ${status}; failing over to next available account (attempt ${transportState.genericFailovers + 1})`);
+      const nextAccountId = rotateGenericOAuthAccountOnFailure(
         config,
         route.providerName,
         transportState.genericFailoverAccountId,

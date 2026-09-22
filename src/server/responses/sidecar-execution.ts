@@ -22,8 +22,9 @@ import { rotateProviderTransportOn429, rateLimitRetryPolicyFor } from "../../pro
 import {
   GENERIC_OAUTH_MAX_FAILOVERS_PER_REQUEST,
   isGenericOAuthFailoverEnabled,
-  rotateGenericOAuthAccountOn429,
+  rotateGenericOAuthAccountOnFailure,
   failoverAccountSnapshot,
+  isRetriableFailoverStatus,
 } from "../../oauth/generic-account-failover";
 import {
   ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST,
@@ -183,7 +184,8 @@ export async function executeResponsesSidecars(
         `${route.providerName}|${route.modelId}|sidecar-oauth-429`,
       );
       if (!hop.allowed) return null;
-      const nextAccountId = rotateGenericOAuthAccountOn429(
+      console.warn(`[opencodex] ${route.providerName} returned HTTP ${status}; failing over to next available account (attempt ${transportState.genericFailovers + 1})`);
+      const nextAccountId = rotateGenericOAuthAccountOnFailure(
         config,
         route.providerName,
         transportState.genericFailoverAccountId,

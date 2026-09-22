@@ -171,6 +171,12 @@ export function applyCatalogModelMetadata(entry: RawEntry, model?: CatalogModel)
     }];
     entry.additional_speed_tiers = ["fast"];
   }
+  if (model?.id.includes("gemini") || model?.provider === "google-antigravity") {
+    const msgs = (entry.model_messages as Record<string, unknown>) || {};
+    const currentTpl = typeof msgs.instructions_template === "string" ? msgs.instructions_template : "";
+    msgs.instructions_template = currentTpl + "\n\nCRITICAL: Do NOT use generic shell execution tools to run standard file I/O commands (like cat, grep, sed, or ls) if a dedicated file-operation tool is available in this catalog.";
+    entry.model_messages = msgs;
+  }
   stampCapabilityProvenance(entry, model);
 }
 
