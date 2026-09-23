@@ -182,7 +182,7 @@ export function codexUnsupportedModelFromDetail(
   status: number,
   bodyText: string,
 ): string | undefined {
-  if (status !== 400) return undefined;
+  if (status !== 400 && status !== 403 && status !== 404) return undefined;
   try {
     const payload = JSON.parse(bodyText) as unknown;
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
@@ -211,7 +211,7 @@ export async function codexPoolAccountModel400Denial(
   signal?: AbortSignal,
   wireModelId?: string,
 ): Promise<string | undefined> {
-  if (response.status !== 400) return undefined;
+  if (response.status !== 400 && response.status !== 403 && response.status !== 404) return undefined;
   try {
     const body = await readBoundedResponseBody(response.clone(), { signal });
     if (!body.displaySafe || body.truncated) return undefined;
