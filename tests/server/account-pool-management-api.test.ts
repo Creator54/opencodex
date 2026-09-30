@@ -179,6 +179,57 @@ describe("Anthropic account pool strategy management API", () => {
     if (testDir) removeTreeWithRetry(testDir);
   });
 
+  test("both settings GETs flag malformed stored Anthropic routes without treating them as valid", async () => {
+    const path = join(testDir, "config.json");
+    const stored = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    const malformed = [{ name: "broken", match: "[", accounts: ["removed-id"] }];
+    stored.anthropicAccountPool = { enabled: true, routes: malformed };
+    writeFileSync(path, JSON.stringify(stored), { mode: 0o600 });
+    const server = startServer(0);
+    try {
+      const unified = await fetch(new URL("/api/pool/settings?provider=anthropic", server.url));
+      const legacy = await fetch(new URL("/api/oauth/accounts/pool?provider=anthropic", server.url));
+      expect(unified.status).toBe(200);
+      expect(legacy.status).toBe(200);
+      const unifiedBody = await unified.json() as Record<string, unknown>;
+      const legacyBody = await legacy.json() as Record<string, unknown>;
+      expect(unifiedBody.routes).toBeNull();
+      expect(legacyBody.routes).toBeNull();
+      expect(unifiedBody.routesError).toEqual(expect.any(String));
+      expect(legacyBody.routesError).toBe(unifiedBody.routesError);
+      expect(JSON.parse(readFileSync(path, "utf8")).anthropicAccountPool.routes).toEqual(malformed);
+    } finally { await server.stop(true); }
+  });
+
+  test("both Anthropic settings writers preserve, replace and clear model routes", async () => {
+    let server = startServer(0);
+    const routes = [{ name: "sonnet", match: "claude-sonnet-*", accounts: ["removed-id"] }];
+    const send = (path: string, body: Record<string, unknown>) => fetch(new URL(path, server.url), {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    try {
+      const unified = await send("/api/pool/settings", { provider: "anthropic", routes });
+      expect(unified.status).toBe(200);
+      expect((await unified.json()).routes).toEqual(routes);
+      expect(loadConfig().anthropicAccountPool?.routes).toEqual(routes);
+      await server.stop(true);
+      server = startServer(0);
+      const reloaded = await fetch(new URL("/api/pool/settings?provider=anthropic", server.url));
+      expect((await reloaded.json()).routes).toEqual(routes);
+      const legacy = await send("/api/oauth/accounts/pool", { provider: "anthropic", strategy: "round-robin" });
+      expect(legacy.status).toBe(200);
+      expect((await legacy.json()).routes).toEqual(routes);
+      const bad = await send("/api/pool/settings", { provider: "anthropic", routes: [{ name: "bad", match: "[", accounts: ["id"] }] });
+      expect(bad.status).toBe(400);
+      const other = await send("/api/pool/settings", { provider: "openai", routes });
+      expect(other.status).toBe(400);
+      const clear = await send("/api/oauth/accounts/pool", { provider: "anthropic", routes: null });
+      expect(clear.status).toBe(200);
+      expect((await clear.json()).routes).toBeNull();
+      expect(loadConfig().anthropicAccountPool?.routes).toBeUndefined();
+    } finally { await server.stop(true); }
+  });
+
   test("GET /api/oauth/accounts/pool surfaces strategy defaults", async () => {
     const server = startServer(0);
     try {
@@ -569,6 +620,7 @@ describe("legacy pool contract goldens (#wp5)", () => {
         strategy: "quota",
         stickyLimit: 1,
         quotaWindow: "five-hour",
+        routes: null,
         experimental: true,
       });
     } finally {
@@ -596,6 +648,7 @@ describe("legacy pool contract goldens (#wp5)", () => {
         strategy: "round-robin",
         stickyLimit: 4,
         quotaWindow: "five-hour",
+        routes: null,
         experimental: true,
       });
     } finally {
@@ -603,11 +656,15 @@ describe("legacy pool contract goldens (#wp5)", () => {
     }
   });
 
-  test("a bad strategy and a bad stickyLimit are rejected identically on every kind", async () => {
+  test("a bad strategy and a bad stickyLimit are rejected identically on every kind, with one null exception", async () => {
     // One validator, three adapters. The kinds keep their own request and response shapes --
     // that is what the goldens above pin -- but the VALUE rules are now a single implementation,
     // so "quota, round-robin, fill-first" and the 1..100 sticky bound cannot drift apart per
     // kind. Before this, the generic kind carried a private copy of both.
+    // ONE deliberate exception: `strategy: null` is not a bad value on the legacy generic
+    // endpoint -- it clears the saved strategy and answers 200. Codex, Anthropic, and the
+    // unified /api/pool/settings route all reject the same null with 400. A future reader
+    // who sees the 200 must not "fix" it back without deciding that contract first.
     const codex = async (payload: Record<string, unknown>) => {
       const req = new Request("http://localhost/api/codex-auth/pool-strategy", {
         method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
@@ -615,19 +672,45 @@ describe("legacy pool contract goldens (#wp5)", () => {
       const resp = await handleCodexAuthAPI(req, new URL(req.url), makeCodexConfig());
       return resp!.status;
     };
-    const server = startServer(0);
+    const previousHome = process.env.OPENCODEX_HOME;
+    const testDir = mkdtempSync(join(tmpdir(), "ocx-pool-validator-"));
+    let server: ReturnType<typeof startServer> | undefined;
     try {
+      process.env.OPENCODEX_HOME = testDir;
+      saveConfig({
+        port: 0,
+        hostname: "127.0.0.1",
+        defaultProvider: "google-antigravity",
+        providers: {
+          "google-antigravity": { adapter: "google", baseUrl: "https://daily-cloudcode-pa.googleapis.com", authMode: "oauth" },
+        },
+      } as OcxConfig);
+      server = startServer(0);
       const oauth = async (payload: Record<string, unknown>) => {
         const res = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
           method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(payload),
         });
         return res.status;
       };
-      for (const strategy of ["weighted", "", 3, null]) {
+      const oauthJson = async (payload: Record<string, unknown>) => {
+        const res = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
+          method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(payload),
+        });
+        return { status: res.status, body: await res.json() as { strategy?: unknown } };
+      };
+      for (const strategy of ["weighted", "", 3]) {
         expect(await codex({ strategy })).toBe(400);
         expect(await oauth({ provider: "anthropic", strategy })).toBe(400);
         expect(await oauth({ provider: "google-antigravity", strategy })).toBe(400);
       }
+      expect(await codex({ strategy: null })).toBe(400);
+      expect(await oauth({ provider: "anthropic", strategy: null })).toBe(400);
+      // The generic legacy contract: null clears the saved strategy. Prove the clear actually
+      // happened -- a 200 that left the old strategy in place would be a silent no-op.
+      expect(await oauth({ provider: "google-antigravity", strategy: "round-robin" })).toBe(200);
+      const cleared = await oauthJson({ provider: "google-antigravity", strategy: null });
+      expect(cleared.status).toBe(200);
+      expect(cleared.body).toHaveProperty("strategy", null);
       // 0 and 101 sit just outside the shared bound; 1 and 100 are the edges that must pass.
       for (const stickyLimit of [0, 101, 1.5]) {
         expect(await codex({ stickyLimit })).toBe(400);
@@ -638,7 +721,13 @@ describe("legacy pool contract goldens (#wp5)", () => {
         expect(await codex({ stickyLimit })).toBe(200);
       }
     } finally {
-      await server.stop(true);
+      try {
+        await server?.stop(true);
+      } finally {
+        if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+        else process.env.OPENCODEX_HOME = previousHome;
+        removeTreeWithRetry(testDir);
+      }
     }
   });
 
@@ -742,17 +831,18 @@ describe("unified pool-settings contract (#695 wp5c)", () => {
     try {
       for (const [provider, kind, supported] of [
         ["openai", "codex", ["strategy", "stickyLimit", "autoSwitchThreshold"]],
-        ["anthropic", "anthropic", ["enabled", "strategy", "stickyLimit", "autoSwitchThreshold", "quotaWindow"]],
+        ["anthropic", "anthropic", ["enabled", "strategy", "stickyLimit", "autoSwitchThreshold", "quotaWindow", "routes"]],
         ["google-antigravity", "generic", ["enabled", "strategy", "stickyLimit", "autoSwitchThreshold"]],
       ] as const) {
         const res = await fetch(new URL(`/api/pool/settings?provider=${provider}`, server.url));
         expect(res.status).toBe(200);
         const dto = await res.json() as Record<string, unknown>;
-        // Same key set for every kind. An unsupported field is a declared null, not an absence,
+        // Valid and absent routes keep the fixed key set; routesError appears only for malformed stored rules.
+        // An unsupported field is a declared null, not an absence,
         // which is the whole difference between a consolidation and a fourth contract.
         expect(Object.keys(dto).sort()).toEqual([
-          "autoSwitchThreshold", "enabled", "enabledEffective", "kind", "provider",
-          "quotaWindow", "stickyLimit", "strategy", "supported",
+          "autoSwitchThreshold", "enabled", "enabledEffective", "kind", "maxConcurrentPerAccount",
+          "provider", "quotaWindow", "routes", "stickyLimit", "strategy", "supported",
         ]);
         expect(dto.kind).toBe(kind);
         expect(dto.supported).toEqual([...supported]);

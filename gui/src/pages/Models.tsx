@@ -2,11 +2,14 @@ import { CodexStaleBanner } from "../components/codex-stale-banner";
 import ModelCatalogSettingsPanels from "../components/ModelCatalogSettingsPanels";
 import ModelDisplayNameDialog from "../components/ModelDisplayNameDialog";
 import ModelPriceDialog from "../components/ModelPriceDialog";
+import ModelSettingsDialog from "../components/ModelSettingsDialog";
 import { fetchCodexAppServerState } from "../codex-app-server-state";
 import type { AppServerStateOutcome } from "../codex-app-server-state";
 import { useCodexRestart } from "../use-codex-restart";
+import { confirmAction } from "../action-dialogs";
+import { editModelAlias, editProviderAlias } from "./models-alias-editing";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Switch, Notice, EmptyState, Select, Tooltip } from "../ui";
+import { Switch, Notice, EmptyState, Select, Tooltip, type NoticeTone } from "../ui";
 import { IconChevron, IconBoxes, IconInfo, IconCheck, IconAlert, IconRefresh, IconPencil } from "../icons";
 import { useT } from "../i18n/shared";
 import type { TFn, TKey } from "../i18n/shared";
@@ -30,6 +33,7 @@ import Combos from "./Combos";
 import RoutingProfiles from "./RoutingProfiles";
 import CompatibilityMatrix from "./CompatibilityMatrix";
 import { ModelsTabStrip } from "./models-tab-strip";
+import { ProviderFastRow } from "./models-fast-row";
 import {
   modelsPanelDomId,
   modelsTabDomId,
@@ -82,7 +86,9 @@ import SubagentSurfaceWarningModal from "../components/SubagentSurfaceWarningMod
 import { SUBAGENT_SURFACE_GUIDE_URL, readSubagentSurfaceAdvisory } from "../subagent-surface";
 import { shadowCallModelOptions } from "./dashboard-shared";
 import { shadowSourceModelBadge, shadowSourceModelLabel } from "./shadow-call-source";
-import { ModelCatalogStateSummary } from "./models-catalog-state";
+import { ModelCatalogDelivery } from "./models-catalog-state";
+import { CustomModelsSummary, InfoHint, ModelsSettingsPanel } from "./models-settings-panel";
+import { modelsSettingsSummary } from "./models-settings-summary";
 
 type CachedModelsPage = {
   models: ModelRow[];
@@ -140,7 +146,7 @@ interface AliasView {
   defaults: { global: boolean; providers: Record<string, boolean> };
 }
 
-export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: { apiBase: string; restartEpoch?: number; catalogSyncedAt?: string }) {
+export default function Models({ apiBase, restartEpoch = 0, connected = false, catalogSyncedAt, reportRestart }: { apiBase: string; restartEpoch?: number; connected?: boolean; catalogSyncedAt?: string; reportRestart: (message: string, tone: NoticeTone) => void }) {
   // Codex app-server staleness (devlog/_fin/260815_gui_codex_restart). Named
   // appServerState, not catalogState: this file already binds that name to the
   // model-catalog resource state, which is an unrelated concept. (Spelling the
@@ -188,6 +194,10 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
   // this page, and a restart succeeding there must still clear the banner here.
   const { restarting: codexRestarting, restart: handleCodexRestart } = useCodexRestart(apiBase, {
     onSettled: () => { void reloadAppServerState(); },
+    // Reported through the shell, not this page's toast: a restart takes up to 30s and
+    // outlives a navigation away, and an outcome that says app-servers are still running
+    // must not be discarded because the user moved on while waiting for it.
+    report: reportRestart,
   });
 
   useEffect(() => {
@@ -290,9 +300,8 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
       pickerFlight.current?.controller.abort();
       pickerFlight.current?.clear();
       pickerFlight.current = null;
-      cancelAppServerRead();
     };
-  }, [apiBase, catalogActive, cancelAppServerRead]);
+  }, [apiBase, catalogActive]);
   useLayoutEffect(() => {
     // Pin inferred Custom before any late GET can switch mode and unmount its draft.
     if (catalogActive && pickerDraft === null && pickerMode === "custom") setPickerDraft("custom");
@@ -353,6 +362,7 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
   const [displayNameModel, setDisplayNameModel] = useState<ModelRow | null>(null);
   const [priceModel, setPriceModel] = useState<ModelRow | null>(null);
   const priceTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [settingsModel, setSettingsModel] = useState<ModelRow | null>(null);
   const [displayNameSaving, setDisplayNameSaving] = useState(false);
   const [displayNameRequestError, setDisplayNameRequestError] = useState<string | null>(null);
   const [displayNameRecovery, setDisplayNameRecovery] = useState<{
@@ -380,29 +390,11 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
     return () => controller.abort();
   }, [reloadAliases]);
 
-  const saveProviderAlias = async (provider: string) => {
-    const entered = window.prompt(t("models.aliasPrompt"), aliases.providers[provider] ?? "");
-    if (entered === null) return;
-    const response = await fetch(`${apiBase}/api/providers/${encodeURIComponent(provider)}/alias`, {
-      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias: entered.trim() || null }),
-    });
-    if (!response.ok) { publishFeedback(false, t("models.aliasConflict")); return; }
-    await reloadAliases();
-    publishFeedback(true, t("models.aliasSaved"));
-  };
-
-  const saveModelAlias = async (provider: string, model: string) => {
-    const current = aliases.models[provider]?.[model]?.alias ?? "";
-    const entered = window.prompt(t("models.modelAliasPrompt"), current);
-    if (entered === null) return;
-    const body = entered.trim() ? { set: { [model]: entered.trim() } } : { remove: [model] };
-    const response = await fetch(`${apiBase}/api/providers/${encodeURIComponent(provider)}/model-aliases`, {
-      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
-    });
-    if (!response.ok) { publishFeedback(false, t("models.aliasConflict")); return; }
-    await reloadAliases();
-    publishFeedback(true, t("models.aliasSaved"));
-  };
+  const aliasEditingDeps = { apiBase, t, reloadAliases, publishFeedback };
+  const saveProviderAlias = (provider: string) =>
+    editProviderAlias(provider, aliases.providers[provider] ?? "", aliasEditingDeps);
+  const saveModelAlias = (provider: string, model: string) =>
+    editModelAlias(provider, model, aliases.models[provider]?.[model]?.alias ?? "", aliasEditingDeps);
 
   const setDefaultAliases = async (enabled: boolean, provider?: string) => {
     const response = await fetch(`${apiBase}/api/default-aliases`, {
@@ -1196,7 +1188,12 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
     await Promise.all([loadModelDiscovery(), load()]);
   };
 
-  const applyPreset = async (provider: string, mode: "preset" | "all") => {
+  const applyPreset = async (provider: string, mode: "preset" | "all", replacing?: { presetCount: number }) => {
+    // Consent lives with the write, not with the button, so every caller is gated.
+    if (replacing && !(await confirmAction({
+      message: t("models.presetConfirmReplace", { count: String(replacing.presetCount) }),
+      tone: "danger",
+    }))) return;
     if (catalogMutationRef.current) return;
     catalogMutationRef.current = true;
     setPresetBusy(provider);
@@ -1367,7 +1364,8 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
     }
   };
 
-  const deleteCustomModel = async (id: string) => {
+  const deleteCustomModel = async (id: string, name: string) => {
+    if (!(await confirmAction({ message: t("models.customDeleteConfirm", { name }), confirmLabel: t("common.delete"), tone: "danger" }))) return;
     try {
       const r = await fetch(`${apiBase}/api/custom-models/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (r.ok) {
@@ -1553,13 +1551,11 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
                            color: preset.mode === mode ? undefined : "var(--muted)",
                          }}
                          disabled={busy || busyHere || selectionPending}
-                         onClick={(e) => {
-                           e.stopPropagation();
-                           // Switching from a custom selection destroys it, so confirm first.
-                           if (mode === "preset" && preset.mode === "custom"
-                             && !confirm(t("models.presetConfirmReplace", { count: String(preset.presetCount) }))) return;
-                           void applyPreset(provider, mode);
-                         }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          // Switching from a custom selection destroys it, so consent first.
+                          void applyPreset(provider, mode, mode === "preset" && preset.mode === "custom" ? preset : undefined);
+                        }}
                        >
                          {t(`models.presetMode_${mode}` as TKey)}
                        </button>
@@ -1686,6 +1682,8 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
                 </div>
               </div>
             )}
+            {!nativeProviderGroup && <ProviderFastRow summary={providers.find(p => p.name === provider)} apiBase={apiBase}
+              onSaved={(saved, message) => { publishFeedback(saved, message); if (saved) void load(true); }} />}
             {rows.length === 0 && (
               <EmptyProviderHint liveModels={liveModels} discovery={discovery} showFailureBadge={false} />
             )}
@@ -1790,6 +1788,7 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
                          </button>
                        </>
                      )}
+                     {!m.native && !m.custom && m.provider !== "combo" && <button type="button" className="btn btn-ghost btn-sm text-caption models-display-name-trigger" aria-haspopup="dialog" aria-label={t("models.settingsTitle", { model: m.namespaced })} onClick={() => setSettingsModel(m)}>{t("models.customEdit")}</button>}
                      {!m.custom && recentIds.has(m.id) && <span className="badge badge-amber">{t("models.newBadge")}</span>}
                      {m.contextCapped && <span className="models-chip muted mono text-caption">{t("models.contextCappedValue", { value: fmtK(m.contextCap ?? contextCapValue) })}</span>}
                    </div>
@@ -1867,12 +1866,13 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
                                type="button"
                                className="btn btn-ghost btn-sm text-caption"
                                style={{ color: "var(--red)" }}
-                               onClick={() => {
-                                 if (window.confirm(t("models.customDeleteConfirm", { name: m.displayName ?? m.id }))) {
-                                   void deleteCustomModel(m.customId!);
-                                 }
-                                 setHoveredModel(null);
-                               }}
+                              onClick={() => {
+                                // Hover is cleared AFTER the dialog closes, not before it
+                                // opens: dropping it first unmounts this button, and the
+                                // dialog then has nothing to return focus to.
+                                void deleteCustomModel(m.customId!, m.displayName ?? m.id)
+                                  .finally(() => setHoveredModel(null));
+                              }}
                              >{t("models.customDelete")}</button>
                            </div>
                          )}
@@ -2125,7 +2125,7 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
           </>
         )}
         <Switch on={allCapped} onClick={setAll} disabled={busy} label={t("models.setAll")} />
-        <span className="muted text-label leading-body">{t("models.setAllHint", { value: fmtK(contextCapValue) })}</span>
+        <InfoHint text={t("models.setAllHint", { value: fmtK(contextCapValue) })} />
       </div>
 
       <div className="row models-cap-row" aria-busy={pickerBusy || pickerResource.state.refreshing}>
@@ -2154,31 +2154,28 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
             {t("models.pickerOrder.retry")}
           </button>
         </>}
-        <span className="muted text-label leading-body">{t("models.pickerOrder.hint")}</span>
+        <InfoHint text={t("models.pickerOrder.hint")} />
       </div>
       <ModelCatalogSettingsPanels showOrderEditor={pickerMode === "custom"} apiBase={apiBase} active={catalogActive}
         identities={models} onBusyChange={setPickerBusy} onAccepted={data => acceptPickerOrder(data, true)} onSaved={() => catalogResource.refresh()} />
-
-
-      {(() => {
-        const customCount = models.filter(m => m.custom).length;
-        if (customCount === 0) return null;
-        return (
-          <div className="row muted text-label models-custom-summary">
-            <span className="models-chip mono text-caption">
-              {t("models.customSummary", { count: customCount })}
-            </span>
-          </div>
-        );
-      })()}
-
-      <div className="row muted text-label leading-body models-order-hint">
-        <IconInfo width={15} height={15} aria-hidden="true" />
-        <span>{t("models.orderHint")}</span>
-      </div>
+      {showAliases && (
+        <div className="card models-aliases-card" aria-label={t("models.aliasesTable")}>
+          <div className="row group-head"><strong>{t("models.aliases")}</strong></div>
+          {Object.entries(aliases.models).flatMap(([provider, rows]) => Object.entries(rows).map(([model, value]) => (
+            <div className="row models-model-row" key={`${provider}/${model}`}>
+              <code className="mono text-caption" style={{ flex: 1 }}>{provider}/{model}</code>
+              <strong className="mono text-control">{value.alias}</strong>
+              <span className="models-chip muted text-caption">{value.source === "builtin" ? t("models.aliasAuto") : t("models.aliasUser")}</span>
+              {value.stale && <span className="badge badge-amber">{t("models.aliasStale")}</span>}
+              <button type="button" className="btn btn-ghost btn-sm" aria-label={t("models.editModelAlias")} onClick={() => void saveModelAlias(provider, model)}><IconPencil style={{ width: 13, height: 13 }} /></button>
+            </div>
+          )))}
+        </div>
+      )}
     </>
   );
 
+  const customCount = models.filter(m => m.custom).length;
   const collapseControls = (
     <div className="row models-collapse-controls">
       <button type="button" className="btn btn-ghost btn-sm text-caption" onClick={() => setAllCollapsed(true)} disabled={busy}>
@@ -2187,6 +2184,8 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
       <button type="button" className="btn btn-ghost btn-sm text-caption" onClick={() => setAllCollapsed(false)} disabled={busy}>
         <IconChevron width={12} height={12} aria-hidden="true" style={{ transform: "rotate(90deg)" }} /> {t("models.expandAll")}
       </button>
+      <InfoHint text={t("models.orderHint")} />
+      <CustomModelsSummary count={customCount} label={t("models.customSummary", { count: customCount })} />
     </div>
   );
 
@@ -2562,6 +2561,13 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
           </li>)}</ul>
         </Notice>
       </div>}
+      <ModelsSettingsPanel title={t("models.settingsPanel.title")} attentionLabel={t("models.settingsPanel.attention")}
+        warn={!!(v2?.enabled && v2.agentsMaxThreadsConflict) || v2Note !== "" || pickerResource.state.showError}
+        summary={modelsSettingsSummary(t, { multiAgentMode: v2?.multiAgentMode, v2Threads: v2?.maxConcurrentThreadsPerSession, keepNativeOnV1: v2?.keepNativeChatGptOnV1 === true,
+          shadowEnabled: shadowCall?.enabled === true, shadowModel: shadowCall?.model, windowOn: allCapped, windowValue: contextCapValue, newModelsOff: modelDiscovery?.policy === "off", aliasesOn: aliases.defaults.global,
+          pickerMode: modelPickerOrderMode(pickerSettings?.pickerAvailable ?? [], pickerSettings?.pickerOrder ?? [], pickerSettings?.pickerOrderMode) })}>
+        {controlsBlock}
+      </ModelsSettingsPanel>
       <div className="models-workspace-root" aria-busy={catalogState.refreshing || undefined}>
         <aside className="models-workspace-rail" aria-label={t("nav.models")}>
           <div className="models-workspace-rail-header">
@@ -2604,22 +2610,7 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
           </div>
         </aside>
         <section className="models-workspace-main" aria-label={t("models.workspace.mainAria")}>
-          {controlsBlock}
           {collapseControls}
-          {showAliases && (
-            <div className="card" aria-label={t("models.aliasesTable")}>
-              <div className="row group-head"><strong>{t("models.aliases")}</strong></div>
-              {Object.entries(aliases.models).flatMap(([provider, rows]) => Object.entries(rows).map(([model, value]) => (
-                <div className="row models-model-row" key={`${provider}/${model}`}>
-                  <code className="mono text-caption" style={{ flex: 1 }}>{provider}/{model}</code>
-                  <strong className="mono text-control">{value.alias}</strong>
-                  <span className="models-chip muted text-caption">{value.source === "builtin" ? t("models.aliasAuto") : t("models.aliasUser")}</span>
-                  {value.stale && <span className="badge badge-amber">{t("models.aliasStale")}</span>}
-                  <button type="button" className="btn btn-ghost btn-sm" aria-label={t("models.editModelAlias")} onClick={() => void saveModelAlias(provider, model)}><IconPencil style={{ width: 13, height: 13 }} /></button>
-                </div>
-              )))}
-            </div>
-          )}
           <div className="models-provider-list">
             {
               // eslint-disable-next-line react-hooks/refs, react/react-compiler -- The hover ref is only read by row event handlers nested in this renderer.
@@ -2652,10 +2643,11 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
       />
       <ModelsTabStrip tab={tab} onSelect={selectTab} meta={tabMeta} />
       {/*
-        One summary for the active tab. The catalog also names its delivery states;
-        other tabs keep the compact subtitle so their workspaces stay in view.
+        One subtitle for the active tab. The catalog adds its delivery process folded to one
+        line, rendered here rather than in the panel because hidden panels stay mounted.
       */}
-      <ModelCatalogStateSummary subtitleKey={SUBTITLE_TKEY[tab]} catalogSyncedAt={catalogSyncedAt} />
+      <p className="page-sub">{t(SUBTITLE_TKEY[tab])}</p>
+      {tab === "catalog" && <ModelCatalogDelivery connected={connected} catalogSyncedAt={catalogSyncedAt} />}
 
       {/*
         Panels mount lazily and then stay mounted, hidden — a half-typed combo draft
@@ -2784,6 +2776,11 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
             }, 0);
           }}
         />
+      )}
+      {settingsModel && (
+        <ModelSettingsDialog key={`${apiBase}/${settingsModel.namespaced}`} row={settingsModel} apiBase={apiBase}
+          onRefresh={signal => load(true, signal)} onFeedback={publishFeedback}
+          onClose={() => setSettingsModel(null)} />
       )}
     </>
   );

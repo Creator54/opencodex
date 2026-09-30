@@ -105,24 +105,36 @@ Répertoriez et changez de compte de fournisseur et de pools de clés API via le
 la surface est :
 
 ```text
-Usage: ocx account <list|current|use|refresh|auto-switch|priority|login|reauth|code|cancel|remove|add-key|reset-credits|grok-reset-coupons> ...
+Usage: ocx account <list|history|current|use|clear|refresh|auto-switch|alias|priority|pause|resume|pause-exhausted|strategy|sticky|remove|clear-cooldown|add-key|import|import-orca|login|reauth|code|cancel|reset-credits|grok-reset-coupons|main> ...
 
 list [provider]     Codex account pool, OAuth accounts and API keys (identifiers shown masked as the API returns them).
+history openai <pool-account-id> [--limit <1-200>]  Recent routing decisions for one Codex pool account.
 current <provider>  Show the active account or key.
-use <provider> <id> Switch the active credential; 'main' selects the Codex App login.
+use <provider> <id|alias|main|auto> Switch the active credential; 'main' selects the Codex App login, 'auto' clears the selection unless an account carries that id.
+clear <provider>  Clear the manual Codex account selection unconditionally.
 refresh <provider>  Force-refresh Codex or provider quota reports.
 auto-switch <provider> <on|off|status|threshold N>  Control the Codex pool threshold.
-priority <provider> <id|main> [first|earlier|normal|later|last|-100..100|reset]  Selection order; omit the value to read it.
-remove <provider> <id> --yes  Remove a stored account or key after an existence check.
+alias <provider> <id|alias> <display-name|->  Set or clear an account's display name; '-' clears it.
+pause <provider> <id|alias|main>  Hold an account out of automatic selection.
+resume <provider> <id|alias|main>  Return a paused account to automatic selection.
+pause-exhausted <provider>  Pause every account whose quota is spent.
+clear-cooldown <openai|anthropic> <id|alias|main>  Drop a cooldown the proxy set after an upstream failure.
+strategy <provider> [<quota|round-robin|fill-first|least-loaded|reset-first>]  Stratégie du pool ; least-loaded est réservé à Kiro.
+sticky <provider> [<1-100>]  Requests a bound thread keeps on one account; omit the value to read it.
+priority <provider> <id|alias|main> [first|earlier|normal|later|last|-100..100|reset]  Selection order; omit the value to read it.
+remove <provider> <id|alias|main> --yes  Remove a stored account or key after an existence check.
 add-key <provider> [--label <label>]  Add a key read only from piped stdin.
 login/reauth/code/cancel  Run browser or manual-code auth from a headless shell.
 reset-credits <id|main> [--consume --yes]  Inspect or consume Codex reset credits.
 grok-reset-coupons [<id>] [--consume --yes] [--token-id <token-id>] [--operation-id <uuid>]  Inspect or redeem Grok reset coupons.
+import <provider> --format <format> (--file <path>|--stdin)  Import credentials from a named external format.
+import-orca --source <dir> --registry <file> [--apply]  Preview or apply imports from Orca-managed Codex homes.
+main <doctor|list|register|add|reauth|switch|recover>  Manage the Codex App login the pool calls 'main'.
 Switching the active account takes effect immediately; running threads move on their next request, and in-flight requests keep the account they captured.
 A selection-order change applies from the next unbound request and never moves a bound thread.
 ```
 
-Toutes les sous-commandes nécessitent que le proxy soit en cours d'exécution ; le CLI résout automatiquement son port d'exécution enregistré.
+Les sous-commandes nécessitent que le proxy soit en cours d'exécution et résolvent automatiquement son port d'exécution enregistré, sauf `import-orca` : l'aperçu est purement local, et `import-orca --apply` exige que le proxy soit arrêté.
 Les opérations réussies se terminent 0. Utilisation invalide, un fournisseur ou un identifiant inconnu, un
 proxy, ou un échec API se termine 1. Les champs d'informations d'identification sont affichés exactement comme la gestion API
 les renvoie (y compris son masquage) ; Les clés API brutes et les jetons OAuth ne sont jamais restitués. Affichage
@@ -154,9 +166,15 @@ Sans fournisseur, répertorie le groupe de comptes Codex, les comptes OAuth et l
 sont ignorés à moins que `--all` soit présent. Avec un fournisseur, répertorie uniquement cette famille d’informations d’identification.
 La sortie destinée aux utilisateurs utilise `PROVIDER TYPE ID PLAN/LABEL PRIORITY STATUS` ; une ligne Codex sélectionnée manuellement porte la mention
 `selected`. `PRIORITY` est l'ordre de sélection Codex signé (`0` lorsqu'il n'est pas défini) et affiche `-` pour les lignes
-où l'ordre ne s'applique pas, comme les comptes OAuth et les clés API. Avec au moins deux comptes Kiro enregistrés et éligibles, par défaut une réponse 429 entraîne automatiquement une rotation vers un autre
-compte, en privilégiant celui dont l'allocation restante connue est la plus élevée ; la rotation est activée par la présence de plusieurs comptes et ne peut pas être désactivée — `oauthAccountFailover.enabled: false` refuse la préférence de compte avant envoi, pas la récupération après un 429 ; `ocx account login kiro` ajoute les comptes au pool un par un. Un résultat vide est toujours un succès. `--json`
-renvoie :
+où l'ordre ne s'applique pas, comme les comptes OAuth et les clés API. Avec au moins deux comptes Kiro enregistrés, par défaut une réponse 429 peut entraîner une rotation vers un autre compte éligible
+en privilégiant celui dont l'allocation restante connue est la plus élevée ; la rotation est activée par la présence de plusieurs comptes et ne peut pas être désactivée — `oauthAccountFailover.enabled: false` refuse la préférence de compte avant envoi, pas la récupération après un 429 ; `ocx account login kiro` ajoute les comptes au pool un par un. Un résultat vide est toujours un succès.
+
+Pour Kiro, les refus de débit, de quota mensuel confirmé et de suspension confirmée peuvent changer de compte avant toute sortie. Le quota mensuel exclut seulement ce compte jusqu’à la réinitialisation ou l’expiration des données ; une réponse terminée du même compte efface un ancien verdict. Le réglage du fournisseur prime sur le réglage global pour la préférence proactive, sans désactiver la rotation réactive.
+Kiro peut choisir `least-loaded` pour placer les requêtes de façon proactive lorsque `pool.kernel` et la préférence proactive sont activés. `maxConcurrentPerAccount` (1–100) crée une file bornée par compte et par processus : un compte sélectionné saturé attend au plus 250 ms, puis renvoie 503 `account_capacity` avec `Retry-After: 1`. Cette limite ne déplace pas la requête vers un autre compte.
+
+`ocx account list kiro` affiche `not-auto-selected(<raison>)` pour un compte exclu de la sélection automatique. Le JSON contient `autoSelectable` et, si la valeur est fausse, un `skipReason` fermé (`paused`, `needs_reauth`, `suspended`, `cooldown` ou `quota_exhausted`). Un compte actif unique peut encore servir. Les crédits `providerCredits` sont mesurés par `meteringEvent` : la dernière valeur d'une réponse est retenue et les envois facturés séparément sont additionnés, sans estimation à partir des jetons.
+
+`--json` renvoie :
 
 ```text
 { accounts: AccountRow[], notes: string[] }
@@ -173,7 +191,9 @@ cet état et quitte toujours 0. `--json` renvoie :
 { provider, type, activeId: string | null, autoSwitchThreshold?: number, account: AccountRow | null }
 ```
 
-### `ocx account use <provider> <account-or-key-id|main> [--json]`
+### `ocx account use <provider> <account-or-key-id|alias|main|auto> [--json]`
+
+`auto` efface la sélection manuelle pour que le pool place à nouveau le travail selon sa propre stratégie — sauf si un compte Codex porte littéralement l'id `auto`, qui l'emporte par correspondance exacte d'id ; `ocx account clear <provider>` rétablit toujours la sélection automatique. Un compte Codex peut être désigné par l'alias défini avec `ocx account alias` au lieu de son id ; cela vaut aussi pour `priority`, `pause`, `resume`, `clear-cooldown`, `remove` et `alias`. Pour les comptes Codex, `auto`, `main` et `__main__` sont réservés sans distinction de casse et ne peuvent pas être attribués comme alias. Les noms affichés des comptes OAuth et des clés API conservent leurs règles existantes.
 
 Sélectionne un compte Codex, un compte OAuth ou une clé API existant. Pour `openai`, `main` sélectionne la
 connexion Codex App. Une sélection en mode Codex Pool efface l'affinité locale du processus et s'applique à la requête suivante,
@@ -194,6 +214,29 @@ faire basculer la requête vers un autre compte de pool admissible. Ces transiti
 { ok: true, provider, type, activeId }
 ```
 
+### `ocx account pause|resume anthropic <id|alias> [--json]`
+
+La commande CLI suspend ou reprend un compte Anthropic OAuth par id ou alias unique (correspondance exacte, puis sans distinction de casse). Utilise `PUT /api/oauth/accounts/pause` avec `{ provider: "anthropic", accountId, paused }`, également utilisé par le tableau de bord. L’état `paused` est enregistré dans le compte et exposé par `GET /api/oauth/accounts`. La suspension s’applique même si le pool proactif est désactivé : le compte est exclu de la sélection, des affinités et des successeurs 429. Si tous les comptes sont suspendus, les requêtes renvoient 403 jusqu’à une reprise. Les requêtes déjà envoyées continuent ; les identifiants et l’état de santé sont conservés. La suspension survit au redémarrage et à une nouvelle connexion, et disparaît avec la suppression du compte. Les seuils individuels ne font pas partie de cette commande.
+
+### `ocx account clear <provider> [--json]`
+
+Efface la sélection manuelle du compte Codex sans résoudre d'id de compte, donc fonctionne même lorsqu'un compte s'appelle littéralement `auto`. Pools Codex uniquement ; les autres types de fournisseur n'ont pas de sélection automatique à rétablir.
+
+### `ocx account clear-cooldown <openai|anthropic> <id|alias|main> [--json]`
+
+Supprime un délai d'échec local au processus sans modifier les identifiants enregistrés. Utilisez
+`openai` pour un compte du pool Codex ou `anthropic` pour un compte OAuth Anthropic ; les autres
+fournisseurs sont refusés. Les deux formes acceptent un id de compte ou un alias unique, tandis que
+`main` est réservé au pool Codex.
+
+```bash
+ocx account clear-cooldown anthropic <id-or-alias>
+```
+
+La commande réussit même sans délai actif, avec `cleared: false` dans le JSON. La suppression d'un
+délai Anthropic avance aussi la génération du compte afin qu'une ancienne sonde de quota ne puisse
+pas rétablir l'état supprimé ni publier une éligibilité périmée.
+
 ### `ocx account refresh <provider> [--json]`
 
 Pour le groupe de comptes Codex, utilisez `ocx account refresh openai [--json]`. Cette commande force l'actualisation des quotas de compte et
@@ -209,14 +252,18 @@ renvoient 1 ; une sonde de quota en amont qui échoue ou expire produit plutôt 
 
 ### `ocx account auto-switch <provider> <on|off|status|threshold <0-100>> [--json]`
 
-Contrôle le seuil du pool Codex `openai`, ou enregistre celui d’un pool OAuth générique. `on` enregistre 80 %, `off` 0 % et `threshold <n>` accepte 0–100. Un seuil générique n’oriente la sélection que si `pool.kernel` est activé avec `strategy: "fill-first"` ; le drapeau désactivé, sa sauvegarde n’active pas le basculement par seuil. Dans les deux cas, elle ne change ni l’activation du fournisseur, ni la rotation réactive après une erreur 429. Pour les pools génériques, les sorties utilisent la réponse confirmée du serveur. Pour un pool générique, `poolEnabled` est le réglage enregistré (`null` signifie non spécifié), pas l’état effectif hérité. `inert: true` indique un seuil enregistré mais non appliqué, `inert: false` un seuil que le pool applique réellement. L’absence d’`inert` signale une capacité inconnue, qui ne produit jamais `enabled: true`. Les fournisseurs à clé API, Anthropic et les valeurs invalides sont refusés.
+Contrôle le seuil du pool Codex `openai`, ou enregistre celui d’un pool OAuth générique. `on` enregistre 80 %, `off` 0 % et `threshold <n>` accepte 0–100. Un seuil générique n’oriente la sélection que si `pool.kernel` est activé avec `strategy: "fill-first"` ; le drapeau désactivé, sa sauvegarde n’active pas le basculement par seuil. Dans les deux cas, elle ne change ni l’activation du fournisseur, ni la rotation réactive après une erreur 429. Pour les pools génériques, les sorties utilisent la réponse confirmée du serveur. Pour un pool générique, `poolEnabled` est le réglage enregistré (`null` signifie non spécifié), pas l’état effectif hérité. `inert: true` indique un seuil enregistré mais non appliqué, `inert: false` un seuil que le pool applique réellement. L’absence d’`inert` signale une capacité inconnue, qui ne produit jamais `enabled: true`. Les fournisseurs à clé API et les valeurs invalides sont refusés.
+
+### `ocx account auto-switch anthropic … --account <id>`
+
+Pour Anthropic OAuth, `ocx account auto-switch anthropic threshold 90 --account <id>` enregistre un entier de 0 à 100. `off --account <id>` vaut 0, `on --account <id>` vaut 80, `inherit --account <id>` rétablit l’héritage et `status --account <id>` lit sans écrire ; `--json` est disponible. La carte propose le même réglage. Une valeur absente/null hérite de `anthropicAccountPool.autoSwitchThreshold` (80 par défaut) ; 0 désactive seulement le basculement selon l’utilisation de ce compte. Le réglage survit au redémarrage et à la reconnexion, et disparaît avec le compte. Les priorités manuelle/affinité, les replis en cas de quota inconnu ou de comptes épuisés et les routes de modèles restent inchangés. Les seuils sont inactifs si le pool est désactivé ; pause et reprise après 429 restent actives.
 
 ```text
 openai: { provider, autoSwitchThreshold: number, enabled: boolean }
 generic OAuth: { provider, autoSwitchThreshold: number | null, enabled: boolean, poolEnabled: boolean | null, inert: boolean | null }
 ```
 
-### `ocx account priority <provider> <account-id|main> [<-100..100|first|earlier|normal|later|last|reset>] [--json]`
+### `ocx account priority <provider> <account-id|alias|main> [<-100..100|first|earlier|normal|later|last|reset>] [--json]`
 
 Lit ou définit l’ordre de sélection d’un compte du groupe Codex : **une priorité plus élevée est utilisée plus tôt**.
 La valeur par défaut est `0` et la plage va de `-100` à `100`. Seul le groupe Codex `openai` peut être ordonné ;
@@ -249,7 +296,7 @@ l'actualisation de son catalogue de modèles reste en attente, la sortie humaine
 `ocx sync` conseils de récupération sur stderr. `--json` garde la sortie standard analysable et transporte
 `catalogRefreshPending: true` dans l'état de connexion terminé sans avertissement humain.
 
-### `ocx account remove <provider> <id|main> --yes [--json]`
+### `ocx account remove <provider> <id|alias|main> --yes [--json]`
 
 Cette suppression gardée et non interactive nécessite `--yes`. Avant de supprimer, il vérifie que l'identifiant
 existe; un identifiant manquant quitte 1 sans envoyer DELETE. La connexion principale Codex App ne peut pas être supprimée, donc
@@ -391,7 +438,7 @@ proxy en cours d'exécution (`ocx start` ou un service installé).
 | `provider <name> <on\|off>` | `--json` | Activez ou désactivez chaque modèle d'un fournisseur en une seule écriture. |
 | `selected <provider>` | `--set <id,id...>`, `--clear`, `--json` | Lisez ou remplacez la liste autorisée du modèle de fournisseur. `--clear` supprime la liste blanche afin que chaque modèle soit proposé. |
 | `context <status\|value <tokens> [--set-all]\|provider <name> on [--value <tokens>]\|provider <name> off\|all <on\|off>>` | `--json` | Lisez ou définissez la limite de la fenêtre contextuelle, globalement ou par fournisseur. `value <tokens> --set-all` redirige également chaque fournisseur acheminé (comme la bascule du tableau de bord) ; sans cela, la valeur devient uniquement la valeur par défaut. `provider ... on --value <tokens>` définit un plafond explicite pour ce fournisseur uniquement (`--value` est valide avec `on` uniquement). |
-| `shadow <status\|set> [model\|-]` | `--enabled <on\|off>`, `--json` | Lisez ou définissez le modèle de remplacement pour les appels d'assistance en arrière-plan de Codex. `-` efface le modèle. `status` signale également `sourceModels`, l'assistant supprime les interceptions du proxy (par défaut : `gpt-5.6-luna` ; les clients via 0.144.x ont utilisé `gpt-5.4-mini`, qu'une substitution explicite de `sourceModels` peut restaurer). |
+| `shadow <status\|set> [model\|-]` | `--enabled <on\|off>`, `--json` | Lisez ou définissez le modèle de remplacement pour les appels d'assistance en arrière-plan de Codex. `-` efface le modèle. `status` signale également `sourceModels`, l'assistant supprime les interceptions du proxy (par défaut : `gpt-6-luna`, `gpt-5.6-luna` ; les clients via 0.144.x ont utilisé `gpt-5.4-mini`, qu'une substitution explicite de `sourceModels` peut restaurer). |
 
 ```bash
 ocx models live --json                                  # what Codex can actually see right now

@@ -74,13 +74,14 @@ import { suppressedSyntheticMaxCatalogSlugs } from "./catalog/model-hints";
 import { codexRuntimeStatePath, peekCodexRuntimeProcessCache } from "./runtime";
 import { codexAccountNamespaceEntries, isMainCodexAccountTarget } from "./account-namespaces";
 import { MAIN_CODEX_ACCOUNT_ID } from "./main-account";
+import { applyNativeAccessPrograms } from "./catalog/access-programs";
 import {
   availableAccountGatedNativeModels,
   codexModelEntitlementStateForAccount,
   isCodexModelEntitlementSnapshotCurrent,
-  resolveCodexModelEntitlements,
   type CodexModelEntitlementSnapshot,
 } from "./model-entitlements";
+import { resolveAdmittedCodexModelEntitlements } from "./model-entitlement-admission";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "./catalog/native-models";
 import { providerCodexAccountMode } from "../providers/registry";
 import { OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
@@ -384,6 +385,7 @@ function prepareCatalog(
       warningPolicy: "suppress",
     },
   });
+  applyNativeAccessPrograms(mergedModels, modelEntitlements, accountTargets);
   clampCatalogModelsToObservedCodexSupport(
     mergedModels,
     source.runtimeSupport.kind === "available"
@@ -434,7 +436,7 @@ export async function gatherCodexCatalogCandidate(
         providerModelOutcomes,
         discoveryPolicySnapshots: discoveryPolicies,
       }),
-      resolveCodexModelEntitlements(snapshot.config),
+      resolveAdmittedCodexModelEntitlements(snapshot.config),
     ]);
     const processLocal = processEvidence(source);
     const sourceEvidence = sealCatalogGatherEvidenceSession(session);

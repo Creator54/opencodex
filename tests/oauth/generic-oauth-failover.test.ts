@@ -7,15 +7,20 @@ import {
   clearGenericFailoverHealth,
   eligibleFailoverAccounts,
   genericFailoverRetryAfterSeconds,
+  hasEligibleGenericOAuthFailoverTarget,
   hasFailoverAccountQuorum,
   isGenericFailoverProvider,
   isGenericOAuthFailoverEnabled,
   noteGenericPoolSelection,
   preferredInitialAccount,
   rotateGenericOAuthAccountOn429,
+  rotateAntigravityAccountOnAuthRefusal,
 } from "../../src/oauth/generic-account-failover";
-import { getAccountSet, markAccountNeedsReauth, saveCredential, setActiveAccount } from "../../src/oauth/store";
+import { getValidAccessSnapshotForAccount, OAuthAccountPausedError } from "../../src/oauth";
+import { credentialGeneration, getAccountSet, markAccountNeedsReauth, replaceProviderAccountSet, saveCredential, setAccountPaused, setActiveAccount } from "../../src/oauth/store";
+
 import { clearAccountQuotaCache, setCachedProviderAccountQuotaForTests } from "../../src/providers/quota";
+import { subscribeAccountSelections } from "../../src/lib/account-selection-events";
 import { resolveCopilotApiBaseUrl } from "../../src/oauth/github-copilot";
 import { resolveProviderTransport } from "../../src/providers/xai-transport";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
@@ -34,6 +39,7 @@ beforeEach(() => {
 afterEach(() => {
   clearGenericFailoverHealth();
   clearAccountQuotaCache("xai");
+  clearAccountQuotaCache("google-antigravity");
   if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = originalHome;
   removeTreeWithRetry(home);
@@ -60,16 +66,20 @@ function config(enabled?: boolean, perProvider?: boolean): OcxConfig {
   } as unknown as OcxConfig;
 }
 
-async function seed(count: number, offset = 0): Promise<string[]> {
+async function seedProvider(provider: string, count: number, offset = 0): Promise<string[]> {
   for (let i = offset; i < offset + count; i++) {
-    await saveCredential("xai", {
+    await saveCredential(provider, {
       access: `access-${i}`,
       refresh: `refresh-${i}`,
       expires: Date.now() + 3_600_000,
       accountId: `uuid-${i}`,
     } as never, { addAccount: true });
   }
-  return getAccountSet("xai")?.accounts.map(a => a.id) ?? [];
+  return getAccountSet(provider)?.accounts.map(a => a.id) ?? [];
+}
+
+async function seed(count: number, offset = 0): Promise<string[]> {
+  return seedProvider("xai", count, offset);
 }
 
 describe("#2568 generic OAuth account failover", () => {
@@ -203,6 +213,16 @@ describe("#2568 generic OAuth account failover", () => {
     expect(isGenericOAuthFailoverEnabled(config(), "xai")).toBe(false);
   });
 
+  test("pausing an account invalidates the cached failover quorum immediately", async () => {
+    const ids = await seed(2);
+    expect(hasFailoverAccountQuorum("xai")).toBe(true);
+
+    await setAccountPaused("xai", ids[1]!, true);
+
+    expect(hasFailoverAccountQuorum("xai")).toBe(false);
+    expect(isGenericOAuthFailoverEnabled(config(), "xai")).toBe(false);
+  });
+
   test("the presence answer is cached, but a fresh login is visible within the TTL window", async () => {
     // The predicate now runs on requests that never see a 429, and loadAuthStore has no cache of
     // its own — it chmods and re-reads the whole store every call. A count is memoized; a
@@ -241,6 +261,10 @@ describe("#2568 generic OAuth account failover", () => {
     const ids = await seed(2);
     const cfg = config();
     expect(rotateGenericOAuthAccountOn429(cfg, "xai", ids[0]!, "120")).toBe(ids[1]);
+    // The durable roster quorum remains active, but the only alternate is cooled. A denied
+    // request budget must not describe this state as an otherwise available rotation.
+    expect(isGenericOAuthFailoverEnabled(cfg, "xai")).toBe(true);
+    expect(hasEligibleGenericOAuthFailoverTarget("xai", ids[1]!)).toBe(false);
     expect(rotateGenericOAuthAccountOn429(cfg, "xai", ids[1]!, "30")).toBeNull();
     const retryAfter = genericFailoverRetryAfterSeconds("xai");
     // The earliest window wins: a client must not be told to wait for the longest cooldown.
@@ -248,10 +272,40 @@ describe("#2568 generic OAuth account failover", () => {
     expect(retryAfter!).toBeLessThanOrEqual(30);
   });
 
+  test("an uncooled alternate reports an eligible target", async () => {
+    const ids = await seed(2);
+    // The negative case above proves cooled accounts are excluded; without this positive
+    // side an always-false implementation would also pass, silently deleting the
+    // rotation-send-budget attribution for the normal case it exists to describe.
+    expect(hasEligibleGenericOAuthFailoverTarget("xai", ids[0]!)).toBe(true);
+    expect(hasEligibleGenericOAuthFailoverTarget("xai", ids[1]!)).toBe(true);
+  });
+
+  test("a one-account roster reports no eligible target even for a stale failed id", async () => {
+    const [solo] = await seed(1);
+    // The failed account can be removed after the request was sent, leaving one stored account
+    // whose id differs from the failed one. Rotation refuses a roster under two accounts, so the
+    // probe must not describe that state as a rotation the send budget withheld.
+    expect(hasEligibleGenericOAuthFailoverTarget("xai", "removed-account")).toBe(false);
+    expect(hasEligibleGenericOAuthFailoverTarget("xai", solo!)).toBe(false);
+    expect(rotateGenericOAuthAccountOn429(config(true), "xai", "removed-account", null)).toBeNull();
+  });
+
   test("Retry-After drives the cooldown length", async () => {
     const ids = await seed(2);
     rotateGenericOAuthAccountOn429(config(), "xai", ids[0]!, "600");
     expect(genericFailoverRetryAfterSeconds("xai")).toBeGreaterThan(500);
+  });
+
+  test("a stated Retry-After past the local cap is honoured, not truncated", async () => {
+    const ids = await seed(2);
+    const now = Date.now();
+    // One hour. Retrying before it elapses buys a second 429 on an account upstream already
+    // told us to leave alone — the exact wasted send this pool exists to avoid.
+    expect(rotateGenericOAuthAccountOn429(config(), "xai", ids[0]!, "3600", now)).toBe(ids[1]);
+    expect(genericFailoverRetryAfterSeconds("xai", now)).toBe(3600);
+    // Still cooled long after any local truncation would have released it.
+    expect(eligibleFailoverAccounts("xai", now + 20 * 60_000)).toEqual([ids[1]!]);
   });
 
   test("an excluded provider is never enabled, however many accounts it has", async () => {
@@ -282,6 +336,15 @@ describe("#2568 generic OAuth account failover", () => {
 describe("sidecar on429 wiring", () => {
   const coreSource = readResponsesCoreSource();
 
+  test("budget-withheld attribution proves a cooldown-eligible generic OAuth target", () => {
+    // Kiro and non-Kiro continuation, native passthrough and run-turn have budget-denial branches.
+    // A durable two-account quorum is insufficient because it intentionally ignores cooldowns.
+    expect(coreSource.match(/hasEligibleGenericOAuthFailoverTarget\(/g)).toHaveLength(4);
+    // The check must GATE the log, not merely run beside it: every call site wraps
+    // noteAttemptRecoveryWithheld in the eligibility condition.
+    expect(coreSource.match(/hasEligibleGenericOAuthFailoverTarget\([\s\S]*?\)\s*\)\s*noteAttemptRecoveryWithheld/g)).toHaveLength(4);
+  });
+
   test("both sidecar loops receive the SAME hook, so neither can drift key-pool-only", () => {
     const hooks = coreSource.match(/^\s*on429: (\w+),$/gm)?.map(line => line.trim()) ?? [];
     // Two injection sites — the image bridge and the web-search loop — and one shared hook.
@@ -308,7 +371,7 @@ describe("sidecar on429 wiring", () => {
     // The gate is a POSITIVE else-if, not an early return: an early bare return here made the
     // Anthropic arm below unreachable, because Anthropic never has a genericFailoverAccountId.
     expect(body).toContain("genericFailoverAccountId");
-    expect(body).toContain("genericFailovers < GENERIC_OAUTH_MAX_FAILOVERS_PER_REQUEST");
+    expect(body).toContain("genericFailovers < transportState.genericFailoverLimit");
     expect(body).toContain("isGenericOAuthFailoverEnabled(config, route.providerName)");
 
     // Anthropic's pool is excluded from generic failover, so it needs its own arm here or a 429
@@ -358,9 +421,9 @@ describe("sidecar on429 wiring", () => {
     // bearer by hand would reintroduce the mixed-identity bug this helper exists to prevent.
     const snapshotUses = coreSource.match(/failoverAccountSnapshot\(/g) ?? [];
     const helperUses = coreSource.match(/applyFailoverSnapshot\(snapshot(?:, (?:next|retry)Parsed)?\)/g) ?? [];
-    // Five includes native Responses passthrough, which returns before the Chat bridge loop.
+    // Eight includes Antigravity auth rotation, Kiro branches and native passthrough.
     // The explicit count keeps a newly added rotation site from skipping identity pairing.
-    expect(snapshotUses.length).toBe(5);
+    expect(snapshotUses.length).toBe(8);
     expect(helperUses.length).toBe(snapshotUses.length);
     // The bearer is written in exactly one place — inside the helper. Any other occurrence is a
     // rotation site that skipped the pairing rules.
@@ -383,10 +446,10 @@ describe("sidecar on429 wiring", () => {
     const arm = coreSource.slice(armStart, armEnd);
 
     expect(arm).toContain("applyFailoverSnapshot(snapshot, nextParsed)");
-    expect(arm.match(/bindRouteReasoningReplayScope\(\{/g)).toHaveLength(2);
+    expect(arm.match(/bindRouteReasoningReplayScope\(\{/g)).toHaveLength(4);
     expect(arm).toContain("parsed: nextParsed");
     expect(arm).toMatch(/bindRouteReasoningReplayScope\(\{\s*parsed,/);
-    expect(arm.match(/oauthCredentialSnapshot: transportState\.replayOAuthCredentialSnapshot/g)).toHaveLength(2);
+    expect(arm.match(/oauthCredentialSnapshot: transportState\.replayOAuthCredentialSnapshot/g)).toHaveLength(4);
   });
 
   test("every 429 recovery loop carries all three rotators (#3495 follow-up)", () => {
@@ -593,6 +656,96 @@ describe("#695 the generic pool consumes its persisted strategy behind pool.kern
     expect(new Set(served).size).toBeGreaterThan(1);
   });
 
+  test("paused generic OAuth accounts are excluded from failover and cannot resolve directly", async () => {
+    const provider = "google-antigravity";
+    const ids = await seedProvider(provider, 3);
+    await setAccountPaused(provider, ids[1]!, true);
+
+    expect(eligibleFailoverAccounts(provider)).toEqual([ids[0]!, ids[2]!]);
+    await expect(getValidAccessSnapshotForAccount(provider, ids[1]!)).rejects.toBeInstanceOf(OAuthAccountPausedError);
+  });
+
+  test("quota-based proactive preference never selects a paused account", async () => {
+    const provider = "google-antigravity";
+    const model = "gemini-3.8-flash";
+    const ids = await seedProvider(provider, 3);
+    await setActiveAccount(provider, ids[0]!);
+    await setAccountPaused(provider, ids[1]!, true);
+    const cfg = {
+      pool: { kernel: true },
+      providers: {
+        [provider]: {
+          ...OAUTH_PROVIDER,
+          oauthAccountFailover: { enabled: true },
+        },
+      },
+    } as unknown as OcxConfig;
+    const now = Date.now();
+    setCachedProviderAccountQuotaForTests(provider, ids[0]!, {
+      customWindows: [{ label: "Gem", percent: 100 }], updatedAt: now,
+    });
+    setCachedProviderAccountQuotaForTests(provider, ids[1]!, {
+      customWindows: [{ label: "Gem", percent: 10 }], updatedAt: now,
+    });
+    setCachedProviderAccountQuotaForTests(provider, ids[2]!, {
+      customWindows: [{ label: "Gem", percent: 20 }], updatedAt: now,
+    });
+
+    expect(preferredInitialAccount(cfg, provider, now, model)).toBe(ids[2]!);
+  });
+
+  test("an active paused OAuth account is replaced even when quota preference is disabled", async () => {
+    const provider = "google-antigravity";
+    const ids = await seedProvider(provider, 2);
+    await setActiveAccount(provider, ids[0]!);
+    await setAccountPaused(provider, ids[0]!, true);
+
+    // Pausing the active credential atomically commits the next usable account.
+    expect(getAccountSet(provider)?.activeAccountId).toBe(ids[1]!);
+  });
+
+  test("resuming an account restores it as active when the current account remains paused", async () => {
+    const provider = "google-antigravity";
+    const ids = await seedProvider(provider, 2);
+    await setActiveAccount(provider, ids[0]!);
+    await setAccountPaused(provider, ids[0]!, true);
+    await setAccountPaused(provider, ids[1]!, true);
+
+    await setAccountPaused(provider, ids[0]!, false);
+
+    expect(getAccountSet(provider)?.activeAccountId).toBe(ids[0]!);
+    expect(eligibleFailoverAccounts(provider)).toEqual([ids[0]!]);
+  });
+
+  test("provider account-set replacement preserves operator pause state", async () => {
+    const provider = "google-antigravity";
+    const ids = await seedProvider(provider, 2);
+    await setAccountPaused(provider, ids[1]!, true);
+    const accountSet = getAccountSet(provider)!;
+
+    await replaceProviderAccountSet(provider, accountSet);
+
+    expect(getAccountSet(provider)?.accounts.find(account => account.id === ids[1]!)?.paused).toBe(true);
+    expect(eligibleFailoverAccounts(provider)).not.toContain(ids[1]!);
+  });
+
+  test("pausing a non-active OAuth account publishes a roster invalidation after persistence", async () => {
+    const provider = "google-antigravity";
+    const ids = await seedProvider(provider, 2);
+    await setActiveAccount(provider, ids[0]!);
+    const events: Array<{ provider: string; kind: string }> = [];
+    const unsubscribe = subscribeAccountSelections(event => events.push(event));
+    try {
+      await setAccountPaused(provider, ids[1]!, true);
+    } finally {
+      unsubscribe();
+    }
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ provider, kind: "oauth" });
+    expect(getAccountSet(provider)?.accounts.find(account => account.id === ids[1]!)?.paused).toBe(true);
+  });
+
   test("round-robin is a no-op while pool.kernel is off", async () => {
     const ids = await seed(3);
     await setActiveAccount("xai", ids[0]!);
@@ -695,5 +848,49 @@ describe("#695 the generic pool consumes its persisted strategy behind pool.kern
 
     const next = rotateGenericOAuthAccountOn429(cfg, "xai", sorted[0]!, null);
     expect(next).toBe(sorted[1]!);
+  });
+});
+
+describe("Antigravity authentication refusal selection", () => {
+  test("captured activation survives a failed row becoming needsReauth", async () => {
+    const [a, b] = await seedProvider("google-antigravity", 2);
+    const generation = credentialGeneration(getAccountSet("google-antigravity")!.accounts[0]!.credential);
+    await markAccountNeedsReauth("google-antigravity", a!, true);
+    expect(rotateAntigravityAccountOnAuthRefusal(true, a!, generation, "gemini-3.8-flash")).toBe(b);
+    expect(eligibleFailoverAccounts("google-antigravity")).toEqual([b!]);
+  });
+
+  test("one account and uncaptured activation cannot rotate", async () => {
+    const [a] = await seedProvider("google-antigravity", 1);
+    const generation = credentialGeneration(getAccountSet("google-antigravity")!.accounts[0]!.credential);
+    expect(rotateAntigravityAccountOnAuthRefusal(true, a!, generation, null)).toBeNull();
+    await seedProvider("google-antigravity", 1, 1);
+    expect(rotateAntigravityAccountOnAuthRefusal(false, a!, generation, null)).toBeNull();
+  });
+
+  test("another OAuth provider's roster cannot activate Antigravity auth rotation", async () => {
+    const [a] = await seedProvider("xai", 2);
+    expect(rotateAntigravityAccountOnAuthRefusal(true, a!, "sent-generation", null)).toBeNull();
+    expect(eligibleFailoverAccounts("xai")).toHaveLength(2);
+  });
+
+  test("paused and cooled siblings are skipped in stable roster order", async () => {
+    const [a, b, c] = await seedProvider("google-antigravity", 3);
+    const generation = credentialGeneration(getAccountSet("google-antigravity")!.accounts[0]!.credential);
+    await setAccountPaused("google-antigravity", b!, true);
+    expect(rotateAntigravityAccountOnAuthRefusal(true, a!, generation, null)).toBe(c);
+    expect(rotateAntigravityAccountOnAuthRefusal(true, c!,
+      credentialGeneration(getAccountSet("google-antigravity")!.accounts[2]!.credential), null)).toBeNull();
+  });
+
+  test("a replaced failed credential is not cooled by stale evidence", async () => {
+    const [a, b] = await seedProvider("google-antigravity", 2);
+    const old = credentialGeneration(getAccountSet("google-antigravity")!.accounts[0]!.credential);
+    await saveCredential("google-antigravity", {
+      access: "new-access", refresh: "new-refresh", expires: Date.now() + 3_600_000,
+      accountId: "uuid-0",
+    } as never);
+    expect(rotateAntigravityAccountOnAuthRefusal(true, a!, old, null)).toBe(b);
+    expect(eligibleFailoverAccounts("google-antigravity")).toContain(a!);
   });
 });

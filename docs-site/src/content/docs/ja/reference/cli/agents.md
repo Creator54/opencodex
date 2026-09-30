@@ -13,7 +13,16 @@ description: マルチエージェント、コンボ、可観測性、アクセ�
 
 ```bash
 ocx agent subagents set ark/model-a,openai/gpt-5.5
+ocx agent sidecar web --enabled off
 ```
+
+`--enabled off` はダッシュボードの **オフ (Off)** 行と同じスイッチです。OpenCodex はサイドカーを
+実行しなくなり、Codex 統合は `~/.codex/config.toml` に
+`web_search = "disabled"` を書き込むため、MCP 検索サーバーだけを検索経路にできます。
+`--enabled on` はその行を再び削除します。保存でスイッチが実際に切り替わったとき、コマンドは
+Codex 側の書き込み（`--json` では `codexWebSearch`、それ以外では末尾の
+`Codex config:` 行）を報告し、書き込みできなかった場合は `ocx sync` を案内します。
+このフラグは `vision` でも機能します。
 
 ### `ocx v2 <status|on|off|mode <v1|default|v2>|threads <n>>`
 
@@ -127,7 +136,7 @@ Grok Build モデル フェンスを管理および適用します。
 
 ## クライアント設定のエクスポート
 
-### `ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside|raycast|omo>`
+### `ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside|raycast|omo|cline|kilo|droid>`
 
 実行中のプロキシに接続するクライアント設定を出力します。このコマンドは、ベース URL、モデル一覧、およびクライアントに応じた認証情報参照または `opencodex-loopback` プレースホルダーを含む `opencodex` プロバイダーブロックを、選択したクライアントのネイティブ形式でシリアル化します。
 
@@ -135,7 +144,7 @@ Grok Build モデル フェンスを管理および適用します。
 
 |旗 |アクション |
 | --- | --- |
-| `--client <opencode\|pi\|omp\|hermes\|openclaw\|kimi\|gajae\|dsh\|mcode\|zcode\|prime\|aside\|raycast\|omo>` |必須。クライアントの設定形式を選択します。 |
+| `--client <opencode\|pi\|omp\|hermes\|openclaw\|kimi\|gajae\|dsh\|mcode\|zcode\|prime\|aside\|raycast\|omo\|cline\|kilo\|droid>` |必須。クライアントの設定形式を選択します。 |
 | `--json` |構成 JSON のみを標準出力に出力するため、リダイレクトはバイト正確な出力をキャプチャします。 `--out` 書き込みメモを含むすべての診断は stderr に送られます。 |
 | `--out <path>` |設定を `<path>` に書き込みます。既存のファイルの置き換えを拒否します。 |
 | `--force` | `--out` が既存のファイルを置き換えることを許可します。 |
@@ -165,6 +174,8 @@ ocx export --client opencode --out ~/opencodex-opencode.json
 | `aside` | `~/.aside/u/<account>/models.json`。Aside 自身の `accounts.json` が現在のアカウントとして指す account を使います。マニフェストが読めない場合は、既定のアカウントに落とさず拒否します | `aside-models.json` | なし — loopback placeholder |
 | `raycast` | `~/.config/raycast/ai/providers.yaml` (macOS と Windows で同じ。Raycast は `XDG_CONFIG_HOME` を尊重しません) | `raycast-providers.yaml` | なし — loopback のみ。`api_keys` エントリは書き込まれません |
 | `omo` | `~/.omo/agent/models.json` (`OMO_CODING_AGENT_DIR`、次に `SENPI_CODING_AGENT_DIR`、次に `PI_CODING_AGENT_DIR` の順で設定時に優先。相対値は拒否されます) | `omo-models.json` | なし — loopback placeholder |
+| `kilo` | `~/.config/kilo` 配下で最初に存在する `kilo.jsonc`、`kilo.json`、`opencode.jsonc`、`opencode.json`、`config.json`（`XDG_CONFIG_HOME` が設定されていればその配下）。候補がなければ `kilo.jsonc` | `kilo.jsonc` | `OPENCODEX_KILO_API_KEY` |
+| `droid` | `~/.factory/settings.json` (`%USERPROFILE%\.factory\settings.json` on Windows) | `factory-settings.json` | ループバックのみ・環境変数不要 |
 
 Raycast のエクスポートは、`providers` シーケンスに `id: opencodex` 要素を 1 つだけ持つ独立した `providers.yaml` 文書です。内容は `name: OpenCodex`、プロキシの `/v1` ベース URL、および `abilities` 付きのルーティング済み全モデルです (`tools` と `system_message` は常にサポート、`vision` はカタログの入力モダリティから、`reasoning_effort` はモデルに effort ラダーがある場合、`temperature` は推論モデルではオフ)。Custom Providers は Raycast Pro の機能で、Raycast はこのファイルを監視しているため、保存した変更は再起動なしで反映されます。形式は [manual.raycast.com/ai/custom-providers](https://manual.raycast.com/ai/custom-providers) に記載されています。`api_keys` エントリは書き込まれないため、このエクスポートは loopback 専用で、loopback 以外のバインドは拒否されます。
 
@@ -174,7 +185,7 @@ opencode は `{env:OPENCODEX_OPENCODE_API_KEY}` を補間します。opencodex �
 `ocx export` は実際のクライアント設定を書き込むことはありません。宛先は手動でマージできるように出力されます。`--out` は、`--force` なしで既存のファイルを上書きすることを拒否します。これは、設定を置き換えると、その中にすでに含まれている他のプロバイダー、エージェント、および MCP エントリが破壊されるためです。
 :::
 
-キーはシリアル化されません。生成される設定には、文書化された環境参照か、秘密ではないループバック用プレースホルダーのいずれかが入ります。ループバック プロキシ (`127.0.0.1`、デフォルト) にはアドミッション キーはまったく必要ありません。クライアントの設定形式が対応しており、プロキシがループバック以外のアドレスにバインドする場合にのみ、参照される環境変数を設定してください。アドミッション キーの発行方法は [Remote access](/reference/configuration/#remote-access) を参照してください。上流プロバイダー自体のキーは別の設定です。[Providers](/guides/providers/) を参照してください。
+キーはシリアル化されません。生成される設定には、文書化された環境参照か、秘密ではないループバック用プレースホルダーのいずれかが入ります。ループバック プロキシ (`127.0.0.1`、デフォルト) にはアドミッション キーはまったく必要ありません。クライアントの設定形式が対応しており、プロキシがループバック以外のアドレスにバインドする場合にのみ、参照される環境変数を設定してください。アドミッション キーの発行方法は [Remote access](/ja/reference/configuration/server/#リモートアクセス) を参照してください。上流プロバイダー自体のキーは別の設定です。[Providers](/guides/providers/) を参照してください。
 
 生成される gjc 連携は秘密ではないループバック用の値を使うため、環境変数は不要です。ループバック専用で、リモート接続の認証情報は設定しません。
 

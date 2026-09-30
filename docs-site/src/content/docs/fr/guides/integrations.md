@@ -1,10 +1,10 @@
 ---
 title: Intégrations
-description: Connectez opencodex à OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, gjc, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent, Aside, Raycast et omo depuis le tableau de bord — un commutateur par client, avec une sauvegarde avant chaque écriture.
+description: Connectez opencodex à OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, gjc, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent, Aside, Raycast, omo, Cline CLI, Kilo et Factory Droid depuis le tableau de bord — un commutateur par client, avec une sauvegarde avant chaque écriture.
 ---
 
 L'onglet **Intégrations** écrit le bloc fournisseur d'opencodex dans le fichier de configuration du client,
-puis peut le retirer. Quinze clients fonctionnent ainsi, chacun avec son propre commutateur :
+puis peut le retirer. Dix-sept clients fonctionnent ainsi, chacun avec son propre commutateur :
 
 | Client | Fichier de configuration | Format | Prise d'effet de la modification | Identifiant |
 |---|---|---|---|---|
@@ -23,6 +23,10 @@ puis peut le retirer. Quinze clients fonctionnent ainsi, chacun avec son propre 
 | Raycast | `~/.config/raycast/ai/providers.yaml` | YAML | immédiatement à l'enregistrement — Raycast surveille le fichier | aucun — bouclage uniquement |
 | omo | `~/.omo/agent/models.json` | JSON | nouvelles sessions | espace réservé de bouclage |
 | Cline CLI | `~/.cline/data/settings/providers.json` + `models.json` | JSON | après arrêt et redémarrage | bouclage uniquement |
+| Kilo | premier fichier existant parmi `kilo.jsonc`, `kilo.json`, `opencode.jsonc`, `opencode.json` ou `config.json` sous `~/.config/kilo` (`XDG_CONFIG_HOME` déplace ce répertoire ; `kilo.jsonc` est créé si aucun n'existe) | JSONC | nouvelles sessions | `OPENCODEX_KILO_API_KEY` |
+| Factory Droid | `~/.factory/settings.json` (`%USERPROFILE%\.factory\settings.json` sous Windows) | JSON | dès la détection du fichier | boucle locale sans clé |
+
+Les modèles GJC dotés d'une échelle d'effort de raisonnement prise en charge exportent `reasoning: true`, `thinking.levels` et `compat.supportsReasoningEffort`, afin que GJC propose le choix de l'effort. Les modèles Codex natifs reçoivent leur échelle standard même si le catalogue l'omet. Ces champs sont absents sans échelle connue ; `none` n'envoie pas d'effort et `ultra` devient `max` sur le réseau. Actualisez l'intégration pour mettre à jour ces options.
 
 La prise en charge gérée de DSH exige au minimum **DSH 0.1.0-rc.6**. OpenCodex ne possède que le fragment
 `llm-pi-ai.providers.opencodex` : **Appliquer** et **Actualiser** remplacent ce fragment, **Désactiver** ne
@@ -133,6 +137,8 @@ n'est jamais réécrit. Pour les autres formats susceptibles de contenir des com
 Kimi Code, gjc, MiniMax Code et Raycast — documents YAML, JSON5 et TOML réécrits en entier), ou lorsque les propres entrées
 d'opencodex ont été modifiées, le commutateur se verrouille et la désactivation est refusée plutôt que de
 deviner quelles modifications vous appartiennent.
+
+Exception pour Hermes : l'ajout de `session_affinity_header: session-id` seul dans un bloc déjà géré peut être adopté via **Apply** ; toute autre modification d'un champ géré reste un conflit. Jusqu'à cette application, l'actualisation automatique de la liste des modèles est également suspendue. Le réglage concerne tous les modèles du provider et nécessite une version de Hermes qui le prend en charge ; il ne garantit aucun taux de succès du cache. Voir le [guide de mise à niveau en anglais](/guides/integrations/#hermes-session-affinity).
 
 ## Prévisualiser et confirmer les modifications
 
@@ -254,6 +260,36 @@ Les détails des clients ont été vérifiés par rapport au format de configura
 consultez les notes de recherche dans
 `devlog/_fin/260802_client_toggle_api/002_client_toggle_matrix.md` pour savoir ce qui a été contrôlé et quand.
 
+## ZCode 3.14 et versions ultérieures
+
+ZCode 3.14 a déplacé ses fournisseurs personnalisés vers `~/.zcode/v2/provider_config.json` et ne
+lit plus `~/.zcode/v2/config.json` qu'au travers d'un import unique, exécuté seulement quand le
+nouveau fichier est absent. ZCode crée ce nouveau fichier au premier lancement : sur toute
+installation déjà démarrée une fois, l'import a donc déjà eu lieu et une écriture dans
+`config.json` n'atteint plus rien.
+
+opencodex écrit désormais `provider_config.json` directement quand il le peut. Activer
+l'intégration ajoute la règle de fournisseur `opencodex` dans ce fichier, une actualisation du
+catalogue la met à jour, et la désactivation retire exactement ce qu'opencodex y a mis. Toutes les
+autres règles du fichier restent intactes, y compris celle qu'un autre fournisseur conserve pour un
+identifiant de modèle qui figure aussi chez nous. Une règle portant l'identifiant `opencodex`
+qu'opencodex n'a pas écrite est un conflit et non quelque chose à reprendre : réglez-la dans ZCode,
+ou utilisez l'écrasement explicite.
+
+Deux situations refusent encore au lieu d'écrire. Un bloc écrit par opencodex avant le déplacement
+du stockage maintient l'intégration sur `config.json` : désactivez-la d'abord à cet endroit, puis
+réactivez-la pour écrire le nouveau stockage. Et un `provider_config.json` dont le
+`schemaVersion` n'est pas un de ceux qu'opencodex a observés est signalé plutôt que fusionné :
+ce fichier contient tous les fournisseurs de ZCode, et y affirmer une forme échangerait une
+absence d'effet silencieuse contre une perte silencieuse. L'état nomme le fichier que ZCode lit dès
+que l'intégration ne l'écrit pas.
+
+Dans ce second cas, ajoutez le fournisseur dans les réglages de ZCode : URL de base
+`http://127.0.0.1:10100/v1` (ajustez le port à votre écoute), une clé non vide quelconque, et les
+identifiants de modèle donnés par `ocx export --client zcode`. Supprimer
+`provider_config.json` pour relancer l'import de ZCode n'est pas pris en charge : cela détruit
+tous les fournisseurs que ZCode y conserve.
+
 ## Cline CLI
 
 Cline CLI utilise providers.json et models.json. Quittez Cline avant toute modification ou synchronisation, puis redémarrez-le. Annuler restaure les deux originaux. Le fournisseur par défaut reste inchangé. Cette intégration ne migre pas le stockage des anciennes extensions VS Code.
@@ -265,3 +301,17 @@ ocx integration client restore --op <operation-id>
 ```
 
 [CLI / rollback / CLINE_PROVIDER_SETTINGS_PATH](/guides/integrations/#cline-cli).
+
+## Kilo
+
+Kilo n’écrit que `provider.opencodex` dans le premier fichier global existant sous `~/.config/kilo` (`XDG_CONFIG_HOME` déplace ce répertoire ; `kilo.jsonc` est créé si aucun candidat n’existe). Si un autre fichier candidat définit aussi `provider.opencodex`, l’état signale un conflit et Appliquer refuse. Les autres clés restent inchangées. Appliquer réécrit tout le fichier ; commentaires et virgules finales ne sont pas conservés. Sélectionnez `opencodex/<modèle>` dans Kilo.
+
+Désactiver peut retirer le bloc appartenant à OpenCodex du fichier enregistré même si un autre candidat est en conflit ou ne peut pas être analysé ; cet autre fichier reste intact.
+
+```bash
+ocx integration client enable --client kilo
+```
+
+## Factory Droid
+
+Factory Droid utilise `~/.factory/settings.json` (`%USERPROFILE%\.factory\settings.json` sous Windows). Activez explicitement l’intégration avec `ocx integration client enable --client droid`, puis choisissez un modèle personnalisé dans `/model`. Les entrées gérées n’utilisent pas de clé et fonctionnent uniquement en boucle locale. La désactivation supprime ces entrées ; l’annulation restaure les octets sauvegardés. Si l’ancien `config.json` contient des entrées OpenCodex ou si `settings.local.json` remplace `customModels`, résolvez ce conflit avant l’activation. Consultez la [documentation Factory BYOK](https://docs.factory.ai/model-independence/byok).

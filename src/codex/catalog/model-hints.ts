@@ -45,6 +45,7 @@ import type { FastPolicyAuthority } from "../../providers/fastwire";
 import { effectiveGoogleMode, getProviderRegistryEntry, providerMatchesRegistryTransport, registryEntryForProviderDestination } from "../../providers/registry";
 import { parseAntigravityAvailableModels, registerAntigravityDiscoveredWireModels } from "../../providers/antigravity-models";
 import { applyProviderContextCap, providerContextCap, resolveUnknownRoutedContextWindow } from "../../providers/context-cap";
+import { githubCopilotCatalogContextWindow } from "../../providers/github-copilot-context";
 import { clampAutoCompactTokenLimit } from "../../providers/auto-compact-budget";
 import { effectiveModelAliases } from "../../providers/default-aliases";
 import { routedSlug, slugEquals, slugEquivalenceKey, slugsEquivalent } from "../../providers/slug-codec";
@@ -310,9 +311,8 @@ export function applyProviderConfigHints(
     ...modelWithoutServiceTier
   } = model;
   // 已发现窗口只允许被配置值压低；缺窗口时，已开的 Context cap 就是实际窗口。
-  const discoveredWindow = typeof model.contextWindow === "number" && model.contextWindow > 0
-    ? model.contextWindow
-    : undefined;
+  const discoveredWindow = githubCopilotCatalogContextWindow(name, prov, model.id,
+    typeof model.contextWindow === "number" && model.contextWindow > 0 ? model.contextWindow : undefined);
   const projectedLimits = clampObservedModelLimits(staticPolicy.model, {
     ...(discoveredWindow !== undefined ? { contextWindow: discoveredWindow } : {}),
     ...(typeof model.maxInputTokens === "number" && model.maxInputTokens > 0 ? { maxInputTokens: model.maxInputTokens } : {}),
@@ -426,6 +426,25 @@ export function suppressedSyntheticMaxCatalogSlugs(
 export const QUIET_AUTHORITATIVE_CATALOG_PROVIDERS = new Set(["kimi", "xai"]);
 
 export const CALLABLE_CONFIGURED_COMPATIBILITY_MODELS: Readonly<Record<string, ReadonlySet<string>>> = {
+  // CodeBuddy's vendor defaults are real callable selectors — both the bundled manifests
+  // (`product.json` / `product.internal.json`) and `--model` accept them — but the key-scoped
+  // configuration roster omits them. Without this entry, a successful live roster
+  // would drop the configured default ("default" for CN, "default-model" for Global) from
+  // the catalog even though the client can still call it (maintainer review, #5147).
+  codebuddy: new Set([
+    "default-model",
+  ]),
+  "codebuddy-cn": new Set([
+    "default",
+  ]),
+  // MiniMax serves MiniMax-M3.1-Flash-Preview to Token Plan keys, but its /v1/models roster
+  // does not list the preview (probed 2026-09-30), so a live roster would drop it.
+  minimax: new Set([
+    "MiniMax-M3.1-Flash-Preview",
+  ]),
+  "minimax-cn": new Set([
+    "MiniMax-M3.1-Flash-Preview",
+  ]),
   kimi: new Set([
     "k3[1m]",
     "kimi-k2.7-code",

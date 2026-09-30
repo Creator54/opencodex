@@ -29,18 +29,32 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
       "--socks5-off          Clear a saved SOCKS5 outbound proxy from config.proxy.",
     ],
   },
-  { name: "stop", usage: "ocx stop", summary: "Stop the proxy and restore native Codex config." },
+  {
+    name: "stop",
+    usage: "ocx stop [--json]",
+    summary: "Stop the proxy and restore native Codex config.",
+    details: [
+      "--json keeps the stop path unchanged and prints one structured summary document on stdout; human output moves to stderr.",
+      "Exit codes are identical with and without --json: 0, 1, 79 (history cleanup incomplete), 80 (teardown deferred).",
+    ],
+  },
   {
     name: "restore",
     aliases: ["eject"],
     usage: "ocx restore [back]",
     summary: "Restore native Codex config without stopping the proxy; `restore back` re-points codex at the running proxy.",
+    details: [
+      "--remove-codex-provider-table  Also remove [model_providers.opencodex] when a paginated home made restore keep it. Conversations tagged opencodex stop opening.",
+    ],
   },
   {
     name: "eject",
     aliases: [],
     usage: "ocx eject [back]",
     summary: "Restore native Codex config without stopping the proxy; `eject back` re-points codex at the running proxy.",
+    details: [
+      "--remove-codex-provider-table  Also remove [model_providers.opencodex] when a paginated home made restore keep it. Conversations tagged opencodex stop opening.",
+    ],
   },
   {
     name: "recover-history",
@@ -69,7 +83,7 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   },
   {
     name: "service",
-    usage: "ocx service [install|repair|restart|start|stop|status|uninstall|remove]",
+    usage: "ocx service [install|repair|restart|start|stop|status|uninstall|remove|claim]",
     summary: "Run as a background service.",
     details: [
       "With no subcommand, installs when absent or repairs an existing service.",
@@ -94,9 +108,10 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   {
     name: "tray",
     usage: "ocx tray <install|start|stop|status|uninstall|remove> [--json] [--no-start]",
-    summary: "Install and control the Windows status tray icon.",
+    summary: "Install and control the Windows status tray icon (deprecated in favor of the desktop app).",
     details: [
       "The tray starts at Windows login and provides one-click proxy controls.",
+      "Deprecated: the OpenCodex desktop app provides the tray on Windows, macOS, and Linux; `ocx tray` remains for installs without the desktop app.",
       "Tray start/stop controls the icon only; use its menu to start or stop the proxy.",
       "--no-start (install only) installs the tray without launching it immediately.",
     ],
@@ -113,6 +128,18 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
       "Machine resources: /api/machine/status, /api/machine/shim, /api/machine/clients, /api/machine/sync, /api/machine/disconnect, and the fixed /api/machine/hub-relay namespace.",
       "Remote browser self-logout uses /api/session/logout from the GUI; it is distinct from client disconnect and key revocation.",
       "Credentials are accepted only through stdin; argv and environment credential forms are not supported.",
+    ],
+  },
+  {
+    name: "link",
+    usage: "ocx link <port|issue|status|revoke>",
+    summary: "Allocate and manage a loopback remote home link.",
+    details: [
+      "Port: ocx link port [--json]",
+      "Issue: ocx link issue --alias <alias> --tunnel-port <port> [--json]",
+      "Status: ocx link status [--json]",
+      "Revoke: ocx link revoke --link-id <id> [--json]",
+      "Issue, status, and revoke use the running proxy's loopback management API and admin token.",
     ],
   },
   {
@@ -299,6 +326,16 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
     summary: "Alias of ocx models.",
   },
   {
+    name: "companion",
+    usage: "ocx companion <show|set|reset> ...",
+    summary: "Inspect and configure menu-bar and widget companion usage settings.",
+    details: [
+      "ocx companion and ocx companion show read settings; use --json for machine-readable output.",
+      "ocx companion set accepts one or more key=value assignments; values are parsed as JSON when possible.",
+      "ocx companion reset restores the default settings.",
+    ],
+  },
+  {
     name: "combo",
     usage: "ocx combo <list|show|set|remove> ...",
     summary: "Manage combo virtual models and routing strategies.",
@@ -367,13 +404,25 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   },
   { name: "api-key", usage: "ocx api-key <list|create|rotate|remove> ...", summary: "Alias of ocx access key." },
   {
+    name: "api",
+    usage: "ocx api <protocols|explain|policy> ...",
+    summary: "Inspect protocol paths, preview a request path, and read or change the protocol policy.",
+    details: [
+      "protocols [--provider <name>]   Contract version, API surfaces, protocol settings and feature vocabulary.",
+      "explain --model <id> --inbound <responses|chat|messages> [--feature <key>]...   Preview the request path; sends nothing upstream.",
+      "policy                          Read the protocol policy; with --messages, --unrepresentable or --rollout <switch>=<on|off> it changes config.",
+      "Every rollout switch defaults off. `ocx api policy` writes only when a setting flag is given.",
+    ],
+  },
+  {
     name: "export",
-    usage: "ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside|raycast|omo|cline> [--json] [--out <path>] [--force]",
-    summary: "Print a client config (OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, gjc, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent, Aside, Raycast, omo, Cline) wired to the running proxy.",
+    usage: "ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside|raycast|omo|cline|kilo|droid> [--json] [--out <path>] [--force]",
+    summary: "Print a client config (OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, gjc, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent, Aside, Raycast, omo, Cline, Kilo, Factory Droid) wired to the running proxy.",
     details: [
       "--json prints the generated document as JSON on stdout; use --out for the client's native format.",
       "--out <path> writes the native config there and refuses to replace an existing file without --force.",
       "Cline exports a two-document bundle: settings for providers.json and catalog for sibling models.json. Use integration client enable --client cline for a journaled write.",
+      "Droid exports documented customModels for settings.json; use integration client enable --client droid for a journaled write.",
       "The config never contains a real key; it carries a documented env reference or a non-secret loopback placeholder.",
       "The destination path is printed for merging by hand — ocx never writes your real client config.",
     ],
@@ -426,6 +475,8 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
       "  ocx claude desktop [apply]                         Save and apply the four-family profile",
       "  ocx claude desktop show [--json]                   Show routes, families, and defaults",
       "  ocx claude desktop status [--json]                 Show applied state, drift, and health",
+      "  ocx claude desktop bind <picker-id> <route>        First-party: serve a Code tab picker model with a route",
+      "  ocx claude desktop unbind <picker-id>              Remove a first-party binding",
       "  ocx claude desktop move <route> <family> [--default]",
       "  ocx claude desktop default <family> <route|none>",
       "  ocx claude desktop export <path|->                 Export versioned JSON (`-` = stdout)",
@@ -480,6 +531,7 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
     details: [
       "Alias of ocx integration client <sub> --client zcode.",
       "enable writes the managed provider.opencodex block into ~/.zcode/v2/config.json; disable removes only that block.",
+      "ZCode 3.14 moved its providers to ~/.zcode/v2/provider_config.json; where that file exists, enable is refused because the write cannot reach the client.",
       "ZCode reads its config at startup — restart ZCode after enable/disable.",
       "Select OpenCodex Proxy/<provider>/<model> from ZCode's model picker.",
     ],
@@ -532,6 +584,19 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
     ],
   },
   {
+    name: "resolve",
+    usage: "ocx resolve [--json]",
+    summary: "Emit the resolved config home, effective port, and identity-checked proxy liveness as one JSON document.",
+    details: [
+      "Machine surface for embedding shells: it replaces a second home/port/liveness implementation beside the CLI.",
+      "The port is the live listener's port when an opencodex proxy answers, otherwise the configured port (default 10100).",
+      "Liveness is three-valued: live, absent-proven (every recorded and configured endpoint definitively dead), or unknown — unknown exits 1 and never reads as absent.",
+      "--json emits one versioned document (schema ocx-resolve/1); the default prints two human lines.",
+      "Exit 0 carries a trustworthy verdict; exit 1 means the CLI could not resolve (invalid config or undecidable liveness) and callers must refuse to guess.",
+      "Any unknown argument exits 64 before preflight side effects.",
+    ],
+  },
+  {
     name: "lab",
     usage: "ocx lab <status|verdicts|subjects|subject|observations|events|event|artifacts|artifact|catalog> [options] [--json]",
     summary: "Read-only Compatibility Lab projection inspection (local SQLite; no daemon).",
@@ -551,6 +616,12 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
     hidden: true,
     usage: "ocx __refresh-version [preview|latest]",
     summary: "Hidden detached helper: refresh the cached latest version.",
+  },
+  {
+    name: "__update-badge",
+    hidden: true,
+    usage: "ocx __update-badge",
+    summary: "Hidden internal: print cached package update badge JSON.",
   },
   {
     name: "__tray-start",

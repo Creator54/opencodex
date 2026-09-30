@@ -34,6 +34,23 @@ routed one arrives encrypted and fails. The dashboard asks before either, and li
 [Why v1 is the default](/guides/subagent-v1-default/).
 :::
 
+## Model switches and side-chat compaction
+
+Codex can compact inherited history before the first turn of a side chat or after a model switch.
+One trigger compares the previous and destination models' `comp_hash` compatibility markers:
+when both are present and differ, Codex compacts even if the history fits the destination's context.
+
+OpenCodex represents unknown compatibility for routed models as `comp_hash: null`, instead of
+inventing an `"opencodex"` marker or copying one from a native template. Catalog rebuilds also clear
+those old markers on OpenCodex rows retained during a provider discovery outage. Native models and
+explicit Codex-forward aliases keep their upstream markers, so genuine native incompatibility
+checks still apply. This behavior is independent of the v1/v2 sub-agent surface and the model
+configured to perform compaction.
+
+Normal context and token-limit compaction still applies. This change removes the synthetic
+hash mismatch; it does not select which visible messages a side chat inherits or restore original
+messages from an already compacted context. Provider content support remains a separate constraint.
+
 ## External task input
 
 Codex can deliver a task's initial input or follow-up in a result-shaped envelope
@@ -344,3 +361,8 @@ encrypted, but task text can be retained in Codex history, routed-provider reque
 response/debug state. Existing ciphertext is unchanged, and the option depends on undocumented
 ChatGPT and Codex behavior. See
 [Agent configuration: Plaintext v2 agent messages](/reference/configuration/agents/#plaintext-v2-agent-messages).
+If a streamed ChatGPT response carries no content type, or one that is neither `application/json`
+nor a recognizable event stream, opencodex checks a bounded Responses event prefix before restoring
+the message-tool names. An `application/json` response takes the bounded JSON path instead. The
+probe waits at most `stallTimeoutSec` for its prefix, and a body that stays silent, unrecognized, or
+unreadable fails closed rather than reaching Codex as a successful response.

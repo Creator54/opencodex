@@ -11,6 +11,10 @@ import { startServer } from "../../src/server";
 import type { OcxConfig } from "../../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { startTruncatedSseUpstream } from "../helpers/truncated-sse-upstream";
+import { tapAnthropicSseForLog } from "../../src/server/claude-messages";
+import type { RequestLogContext } from "../../src/server/request-log";
+import { TranslatorBudgetExceededError } from "../../src/lib/translator-budget";
 
 let testDir = "";
 let previousHome: string | undefined;
@@ -208,12 +212,15 @@ test("count_tokens passes through with native credentials", async () => {
   }
 });
 
-test("Fable 1M picker alias preserves native passthrough on both Messages endpoints", async () => {
+// The legacy claude-ocx spelling is what a picker saved before the ocx-claude aliases.
+test.each([
+  "ocx-claude-native--claude-fable-5-1",
+  "claude-ocx-native--claude-fable-5-1",
+])("Fable 1M picker alias %s preserves native passthrough on both Messages endpoints", async pickerModel => {
   const captured: Captured[] = [];
   const upstream = mockAnthropicUpstream(captured);
   saveConfig(cfg(upstream.url.toString().replace(/\/$/, "")));
   const server = startServer(0);
-  const pickerModel = "claude-ocx-native--claude-fable-5-1";
   try {
     const messagesWithoutMarker = await fetch(new URL("/v1/messages", server.url), {
       method: "POST",
@@ -409,7 +416,7 @@ test("alias/mapped models and non-anthropic credentials do NOT pass through", as
     const alias = await fetch(new URL("/v1/messages", server.url), {
       method: "POST",
       headers: OAUTH_HEADERS,
-      body: JSON.stringify({ model: "claude-ocx-mock--test-model", max_tokens: 10, messages: [{ role: "user", content: "x" }] }),
+      body: JSON.stringify({ model: "ocx-claude-mock--test-model", max_tokens: 10, messages: [{ role: "user", content: "x" }] }),
     });
     expect(alias.status).not.toBe(200);
 
@@ -640,3 +647,324 @@ test.each([false, true])("catalog-published native dates retain identity while u
     buildDesktop3pRegistry([], []);
   }
 }, { timeout: SERVER_BUDGET_MS });
+
+// --- tool_use.id wire-contract sanitize on the native branch ---
+// The Anthropic adapter normalizes tool call ids (#1780), but this branch bypasses that
+// adapter, so third-party ids like Devin's `Bash:0#<hex>` would reach api.anthropic.com
+// verbatim and 400 on `^[a-zA-Z0-9_-]+$`. The passthrough sanitizes before serialize.
+
+test("non-conforming tool_use ids are rewritten on the wire, pairing preserved, conforming ids untouched", async () => {
+  const captured: Captured[] = [];
+  const upstream = mockAnthropicUpstream(captured);
+  saveConfig(cfg(upstream.url.toString().replace(/\/$/, "")));
+  const server = startServer(0);
+  try {
+    const pollutedA = "Bash:0#abcdef1234567890";
+    const pollutedB = "Read:7#fedcba0987654321";
+    const conforming = "toolu_01KeepMeVerbatim";
+    const body = {
+      model: "claude-fable-5",
+      max_tokens: 1000,
+      messages: [
+        { role: "user", content: "run them" },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: pollutedA, name: "Bash", input: { cmd: "a" } },
+            { type: "server_tool_use", id: pollutedB, name: "web_search", input: { q: "b" } },
+            { type: "tool_use", id: conforming, name: "Read", input: {} },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: pollutedA, content: "ok-a" },
+            { type: "web_search_tool_result", tool_use_id: pollutedB, content: [] },
+            { type: "tool_result", tool_use_id: conforming, content: "ok-c" },
+          ],
+        },
+        { role: "user", content: "go on" },
+      ],
+    };
+    const res = await postNative(String(server.url), "/v1/messages", body);
+    expect(res.status).toBe(200);
+    await res.text();
+
+    const msgs = captured[0].body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    const callBlocks = msgs[1].content;
+    const resultBlocks = msgs[2].content;
+    const wireA = callBlocks[0].id as string;
+    const wireB = callBlocks[1].id as string;
+    for (const wire of [wireA, wireB]) {
+      expect(wire).toMatch(/^[a-zA-Z0-9_-]+$/);
+      expect(wire.length).toBeLessThanOrEqual(64);
+    }
+    expect(wireA).not.toBe(pollutedA);
+    expect(wireB).not.toBe(pollutedB);
+    expect(wireA).not.toBe(wireB);
+    expect(resultBlocks[0].tool_use_id).toBe(wireA);
+    expect(resultBlocks[1].tool_use_id).toBe(wireB);
+    expect(callBlocks[2].id).toBe(conforming);
+    expect(resultBlocks[2].tool_use_id).toBe(conforming);
+
+    // count_tokens shares the branch; the allocator is deterministic per raw id.
+    const res2 = await postNative(String(server.url), "/v1/messages/count_tokens", body);
+    expect(res2.status).toBe(200);
+    const msgs2 = captured[1].body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    expect(msgs2[1].content[0].id).toBe(wireA);
+    expect(msgs2[2].content[0].tool_use_id).toBe(wireA);
+  } finally {
+    await server.stop(true);
+    upstream.stop(true);
+  }
+});
+
+function toolRoundTrip(callId: string, extraCallId?: string) {
+  const calls: Array<Record<string, unknown>> = [{ type: "tool_use", id: callId, name: "Bash", input: { cmd: "a" } }];
+  const results: Array<Record<string, unknown>> = [{ type: "tool_result", tool_use_id: callId, content: "ok" }];
+  if (extraCallId !== undefined) {
+    calls.push({ type: "tool_use", id: extraCallId, name: "Read", input: {} });
+    results.push({ type: "tool_result", tool_use_id: extraCallId, content: "ok-2" });
+  }
+  return {
+    model: "claude-fable-5",
+    max_tokens: 1000,
+    messages: [
+      { role: "user", content: "run" },
+      { role: "assistant", content: calls },
+      { role: "user", content: results },
+    ],
+  };
+}
+
+test("an empty tool_use id fails locally with 400 and never reaches the upstream", async () => {
+  const captured: Captured[] = [];
+  const upstream = mockAnthropicUpstream(captured);
+  saveConfig(cfg(upstream.url.toString().replace(/\/$/, "")));
+  const server = startServer(0);
+  try {
+    const res = await postNative(String(server.url), "/v1/messages", toolRoundTrip(""));
+    expect(res.status).toBe(400);
+    const payload = await res.json() as { type?: string; error?: { type?: string } };
+    expect(payload.error?.type).toBe("invalid_request_error");
+    expect(captured).toHaveLength(0);
+  } finally {
+    await server.stop(true);
+    upstream.stop(true);
+  }
+});
+
+test("an overlength id is rewritten within 64 characters and a colliding valid id stays byte-identical", async () => {
+  const captured: Captured[] = [];
+  const upstream = mockAnthropicUpstream(captured);
+  saveConfig(cfg(upstream.url.toString().replace(/\/$/, "")));
+  const server = startServer(0);
+  try {
+    const overlength = "toolu_" + "x".repeat(80);
+    const polluted = "call:a";
+    const res = await postNative(String(server.url), "/v1/messages", toolRoundTrip(overlength));
+    expect(res.status).toBe(200);
+    await res.text();
+    const msgs = captured[0].body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    const wire = msgs[1].content[0].id as string;
+    expect(wire).toMatch(/^[a-zA-Z0-9_-]+$/);
+    expect(wire.length).toBeLessThanOrEqual(64);
+    expect(msgs[2].content[0].tool_use_id).toBe(wire);
+
+    // A valid id that equals the polluted id's rewritten form keeps its bytes; the
+    // rewrite moves aside so the two calls never share a wire id.
+    const res2 = await postNative(String(server.url), "/v1/messages", toolRoundTrip(polluted, "placeholder"));
+    await res2.text();
+    const rewritten = (captured[1].body.messages as Array<{ content: Array<Record<string, unknown>> }>)[1].content[0].id as string;
+    const res3 = await postNative(String(server.url), "/v1/messages", toolRoundTrip(polluted, rewritten));
+    expect(res3.status).toBe(200);
+    await res3.text();
+    const msgs3 = captured[2].body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    expect(msgs3[1].content[1].id).toBe(rewritten);
+    expect(msgs3[2].content[1].tool_use_id).toBe(rewritten);
+    const moved = msgs3[1].content[0].id as string;
+    expect(moved).not.toBe(rewritten);
+    expect(moved).toMatch(/^[a-zA-Z0-9_-]+$/);
+    expect(moved.length).toBeLessThanOrEqual(64);
+    expect(msgs3[2].content[0].tool_use_id).toBe(moved);
+  } finally {
+    await server.stop(true);
+    upstream.stop(true);
+  }
+});
+
+// --- Mid-stream upstream reset: the stream had started, then the upstream socket went away ---
+
+const PARTIAL_TURN_SSE = [
+  `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: "msg_up", type: "message", role: "assistant", content: [], model: "claude-fable-5", stop_reason: null, usage: { input_tokens: 12, output_tokens: 1 } } })}\n\n`,
+  `event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })}\n\n`,
+  `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "half an ans" } })}\n\n`,
+].join("");
+
+test("a mid-stream upstream reset ends the native stream with an Anthropic error event and logs a failed turn", async () => {
+  const { clearRequestLogsForTests } = await import("../../src/server/request-log");
+  clearRequestLogsForTests();
+  const upstream = startTruncatedSseUpstream(PARTIAL_TURN_SSE);
+  saveConfig(cfg(`http://127.0.0.1:${upstream.port}`));
+  const server = startServer(0);
+  try {
+    const res = await fetch(new URL("/v1/messages?beta=true", server.url), {
+      method: "POST",
+      headers: OAUTH_HEADERS,
+      body: JSON.stringify(claudeBody()),
+    });
+    expect(res.status).toBe(200);
+    // The body ends cleanly with a protocol terminal the client can act on, instead of a
+    // connection reset (or, on some Bun releases, a bare chunked EOF) after "half an ans".
+    const text = await res.text();
+    expect(text).toContain("half an ans");
+    expect(text).toContain("\n\nevent: error\ndata: ");
+    const errorFrame = JSON.parse(text.slice(text.lastIndexOf("data: ") + 6).trim()) as { type: string; error: { type: string; message: string } };
+    expect(errorFrame.type).toBe("error");
+    expect(errorFrame.error.type).toBe("api_error");
+    expect(errorFrame.error.message).toContain("anthropic passthrough upstream stream failed: ");
+    // The committed request is not replayed.
+    expect(upstream.requests()).toBe(1);
+
+    const logs = logsFromApiBody<{
+      status?: number;
+      terminalStatus?: string;
+      closeReason?: string;
+      transportPhase?: string;
+      terminalSource?: string;
+      failureCause?: string;
+      upstreamError?: string;
+      usage?: { inputTokens?: number };
+    }>(await (await fetch(new URL("/api/logs?tail=1", server.url))).json());
+    expect(logs).toHaveLength(1);
+    const row = logs[0]!;
+    // Same row the Responses relay writes for a mid-stream reset: a truncated 200 body is not a
+    // completed turn.
+    expect(row.status).toBe(502);
+    expect(row.terminalStatus).toBe("failed");
+    expect(row.closeReason).toBe("terminal");
+    expect(row.transportPhase).toBe("mid_stream");
+    expect(row.terminalSource).toBe("synthetic");
+    expect(row.failureCause).toBe("transport-ambiguous");
+    expect(row.upstreamError).toContain("anthropic passthrough upstream stream failed: ");
+    // Usage seen before the reset is still recorded.
+    expect(row.usage?.inputTokens).toBe(12);
+  } finally {
+    await server.stop(true);
+    upstream.stop();
+  }
+});
+
+test("a translator budget overflow still errors the tapped stream for callers that map it", async () => {
+  const overflow = new TranslatorBudgetExceededError("live_transient", 1024);
+  let sent = false;
+  const source = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (sent) {
+        controller.error(overflow);
+        return;
+      }
+      sent = true;
+      controller.enqueue(new TextEncoder().encode(PARTIAL_TURN_SSE));
+    },
+  });
+  const calls: unknown[] = [];
+  const logCtx: RequestLogContext = { model: "claude-fable-5", provider: "anthropic-native" };
+  const tapped = tapAnthropicSseForLog(source, logCtx, (status, meta) => calls.push({ status, ...meta }), { stallMs: 5_000, maxBytes: 0 });
+  // The non-streaming native Messages fold turns this error into a 413; an error frame would
+  // have reached it as a generic 502 instead.
+  await expect(new Response(tapped).text()).rejects.toBe(overflow);
+  expect(calls).toEqual([{ status: 200, closeReason: "terminal" }]);
+  expect(logCtx.transportPhase).toBeUndefined();
+});
+
+test("a read rejection that lands before the client abort listener still finalizes as a client cancel", async () => {
+  // Bun can settle a fetch body read before it dispatches the abort listeners (see
+  // consumeForInspection in src/server/relay.ts). Model that order: the signal is already
+  // aborted when the read rejects, and its listener has not run.
+  const signal = { aborted: false, reason: undefined as unknown, addEventListener() {}, removeEventListener() {} };
+  let sent = false;
+  const source = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (sent) {
+        signal.aborted = true;
+        signal.reason = new DOMException("client went away", "AbortError");
+        controller.error(signal.reason);
+        return;
+      }
+      sent = true;
+      controller.enqueue(new TextEncoder().encode(PARTIAL_TURN_SSE));
+    },
+  });
+  const calls: unknown[] = [];
+  const logCtx: RequestLogContext = { model: "claude-fable-5", provider: "anthropic-native" };
+  const tapped = tapAnthropicSseForLog(source, logCtx, (status, meta) => calls.push({ status, ...meta }), {
+    stallMs: 5_000,
+    maxBytes: 0,
+    reqSignal: signal as unknown as AbortSignal,
+  });
+  const text = await new Response(tapped).text();
+  expect(text).not.toContain("event: error");
+  expect(calls).toEqual([{ status: 499, closeReason: "client_cancel" }]);
+  expect(logCtx.transportPhase).toBeUndefined();
+  expect(logCtx.upstreamError).toBeUndefined();
+});
+
+const COMPLETE_TURN_SSE = PARTIAL_TURN_SSE + [
+  `event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`,
+  `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 5 } })}\n\n`,
+  `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`,
+].join("");
+
+test("a reset after message_stop is a finished turn: no error event and a completed row", async () => {
+  const { clearRequestLogsForTests } = await import("../../src/server/request-log");
+  clearRequestLogsForTests();
+  // Only the chunked-encoding trailer is lost; the turn itself arrived whole.
+  const upstream = startTruncatedSseUpstream(COMPLETE_TURN_SSE);
+  saveConfig(cfg(`http://127.0.0.1:${upstream.port}`));
+  const server = startServer(0);
+  try {
+    const res = await fetch(new URL("/v1/messages?beta=true", server.url), {
+      method: "POST",
+      headers: OAUTH_HEADERS,
+      body: JSON.stringify(claudeBody()),
+    });
+    const text = await res.text();
+    expect(text.endsWith(`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`)).toBe(true);
+    expect(text).not.toContain("event: error");
+    const logs = logsFromApiBody<{ status?: number; closeReason?: string; transportPhase?: string; upstreamError?: string }>(
+      await (await fetch(new URL("/api/logs?tail=1", server.url))).json(),
+    );
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ status: 200, closeReason: "terminal" });
+    expect(logs[0]!.transportPhase).toBeUndefined();
+    expect(logs[0]!.upstreamError).toBeUndefined();
+  } finally {
+    await server.stop(true);
+    upstream.stop();
+  }
+});
+
+test("a terminal frame still in the buffer when the read fails counts as seen", async () => {
+  // The reset can land after message_stop but before its blank-line delimiter.
+  const withoutDelimiter = COMPLETE_TURN_SSE.slice(0, -2);
+  let sent = false;
+  const source = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (sent) {
+        controller.error(new Error("The socket connection was closed unexpectedly."));
+        return;
+      }
+      sent = true;
+      controller.enqueue(new TextEncoder().encode(withoutDelimiter));
+    },
+  });
+  const calls: unknown[] = [];
+  const logCtx: RequestLogContext = { model: "claude-fable-5", provider: "anthropic-native" };
+  const tapped = tapAnthropicSseForLog(source, logCtx, (status, meta) => calls.push({ status, ...meta }), { stallMs: 5_000, maxBytes: 0 });
+  const text = await new Response(tapped).text();
+  // The delimiter is restored: an SSE parser drops an event that EOF cuts off before its blank line.
+  expect(text).toBe(`${withoutDelimiter}\n\n`);
+  expect(calls).toEqual([{ status: 200, closeReason: "terminal" }]);
+  expect(logCtx.usage).toEqual(expect.objectContaining({ inputTokens: 12, outputTokens: 5 }));
+});

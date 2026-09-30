@@ -2,7 +2,9 @@ import { createAnthropicAdapter } from "./anthropic";
 import { createBedrockAdapter } from "./bedrock";
 import { createAzureAdapter } from "./azure";
 import type { ProviderAdapter } from "./base";
+import { createClaudeCliAdapter } from "./claude-cli/adapter";
 import { withClinePassDeepSeekV4ToolReplayCompatibility } from "./cline-pass-deepseek-v4-tool-replay";
+import { withUniqueToolCallIds } from "./unique-tool-call-ids";
 import { createCodeBuddyAdapter } from "./codebuddy/adapter";
 import { createQoderAdapter } from "./qoder/adapter";
 import { createCommandCodeAdapter } from "./command-code";
@@ -90,7 +92,7 @@ export const ADAPTER_REGISTRY = {
     wire: "openai-chat",
     mutation: "codex-owned",
     create: (provider: OcxProviderConfig, _context: AdapterFactoryContext) =>
-      withClinePassDeepSeekV4ToolReplayCompatibility(createOpenAIChatAdapter(provider)),
+      withUniqueToolCallIds(withClinePassDeepSeekV4ToolReplayCompatibility(createOpenAIChatAdapter(provider))),
   },
   "ollama-native": {
     wire: "ollama-native",
@@ -145,6 +147,13 @@ export const ADAPTER_REGISTRY = {
     contractParent: "codebuddy",
     create: (provider: OcxProviderConfig, _context: AdapterFactoryContext) => createQoderAdapter(provider),
   },
+  "claude-cli": {
+    // Claude Code speaks the same stream-json contract this repo already parses for CodeBuddy and
+    // Qoder, so the contract is inherited rather than restated. The family owns its args and env,
+    // and the CLI owns the credential: the adapter stores and injects none.
+    contractParent: "codebuddy",
+    create: (provider: OcxProviderConfig, _context: AdapterFactoryContext) => createClaudeCliAdapter(provider),
+  },
 } as const satisfies Record<string, AdapterDefinition>;
 
 export type AdapterId = keyof typeof ADAPTER_REGISTRY;
@@ -188,8 +197,9 @@ export function createRegisteredAdapter(
   const definition = getAdapterDefinition(provider.adapter);
   if (!definition) throw new Error(`Unknown adapter: ${provider.adapter}`);
   const adapter = definition.create(provider, context);
-  if (effectiveAdapterContract(provider.adapter).wire !== "openai-responses") {
-    withInputMediaGuard(adapter);
+  const wire = effectiveAdapterContract(provider.adapter).wire;
+  if (wire !== "openai-responses") {
+    withInputMediaGuard(adapter, wire);
   }
   const buildRequest = adapter.buildRequest.bind(adapter);
   adapter.buildRequest = (parsed, incoming) => {

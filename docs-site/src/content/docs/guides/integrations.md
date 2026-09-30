@@ -1,10 +1,10 @@
 ---
 title: Integrations
-description: Connect opencodex to OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, gjc, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent, Aside, Raycast, omo and Cline CLI from the dashboard — one switch per client, with a backup taken before every write.
+description: Connect opencodex to OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, gjc, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent, Aside, Raycast, omo, Cline CLI, Kilo and Factory Droid from the dashboard — one switch per client, with a backup taken before every write.
 ---
 
 The **Integrations** tab writes opencodex's provider block into a client's own config
-file, and removes it again. Fifteen clients work this way, each with a switch:
+file, and removes it again. Seventeen clients work this way, each with a switch:
 
 | Client | Config file | Format | When the change takes effect | Credential |
 |---|---|---|---|---|
@@ -23,10 +23,19 @@ file, and removes it again. Fifteen clients work this way, each with a switch:
 | Raycast | `~/.config/raycast/ai/providers.yaml` | YAML | immediately on save — Raycast watches the file | none — loopback only |
 | omo | `~/.omo/agent/models.json` | JSON | new sessions | loopback placeholder |
 | Cline CLI | `~/.cline/data/settings/providers.json` and sibling `models.json` | JSON pair | after stopping and restarting Cline | loopback placeholder |
+| Kilo | first existing `kilo.jsonc`, `kilo.json`, `opencode.jsonc`, `opencode.json`, or `config.json` under `~/.config/kilo` | JSONC | new sessions | `OPENCODEX_KILO_API_KEY` |
+| Factory Droid | `~/.factory/settings.json` (`%USERPROFILE%\.factory\settings.json` on Windows) | JSON | immediately via file watching | none — keyless loopback |
 
 Generated catalogs include only enabled models from each provider selection. This applies to both
 downloads and managed integrations, including Pi and Aside. The management model list still shows
 the full roster so you can enable additional models.
+
+`ocx uninstall` disables recorded integrations, including all owned Aside profiles, before deleting
+OpenCodex's recovery state. Unreadable ownership, missing profile registration or a conflicting edit
+stops that deletion. Cleanup is sequential: earlier successful disables are not undone when a later
+one fails. If compensation also fails, a client file may be left in an intermediate state. Inspect
+the reported client files and retained recovery snapshots before retrying; retained state does not
+mean every client was restored or left unchanged.
 
 For Gajae built-in presets, keep the routing choice in `~/.gjc/agent/config.yml`:
 
@@ -37,6 +46,8 @@ modelProfile:
 ```
 
 Keep your chosen `modelProfile.default` to apply it when plain `gjc` starts. The managed integration owns only `providers.opencodex` in `models.yml`; refreshing or disabling that provider does not rewrite your preset choice. Refresh the integration after changing the exported model selection.
+
+GJC models with a supported reasoning-effort ladder export `reasoning: true`, `thinking.levels`, and `compat.supportsReasoningEffort`, so GJC can offer an effort choice. Native Codex models receive their standard ladder even when the catalog omits it. Models without a known ladder omit these fields; `none` and `ultra` are not offered because `none` sends no effort and `ultra` folds to `max` on the wire. Refresh the integration to update these model options.
 
 The managed OpenCode integration owns two fragments: `provider.opencodex` (opencode V1) and
 `providers.opencodex` (opencode V2). Only the V2 block carries the per-model reasoning-effort
@@ -199,6 +210,28 @@ dialog names the file, says what is lost, and points at the snapshot that makes 
 undoable. The switch itself stays locked, because the switch cannot know which edits
 you meant to keep — only you can say so. Nothing else is relaxed: a file we cannot
 parse, or one whose structure we cannot reason about, still refuses.
+
+## Hermes session affinity
+
+The generated `providers.opencodex` block includes `session_affinity_header: session-id` for all
+models. This names a header; Hermes supplies its dynamic conversation identifier. OpenCodex does
+not write a shared static identifier or change `api_mode` to enable affinity.
+
+Use a Hermes version supporting [per-provider request options](https://hermes-agent.nousresearch.com/docs/user-guide/configuring-models#per-provider-request-options).
+Older versions may ignore or discard the option; a valid configuration alone does not prove that
+Hermes sends the header. Conversation isolation, compaction lineage and auxiliary/child requests
+follow Hermes' affinity semantics. This setting does not guarantee a particular cache-hit rate.
+
+For an existing managed integration, open **Integrations → Hermes**, review **Apply**, and confirm
+the update. Until then, it shows **Update needed** and implicit catalog refresh leaves it unchanged,
+including its model list. Reading the page does not upgrade the configuration. After Apply, normal
+catalog refresh resumes and retains the setting; **Replace** also includes it.
+
+If you already added exactly `session_affinity_header: session-id` inside the managed block, Apply
+can adopt it when all other managed settings still match the ownership record. This is the narrow
+exception to the conflict rule above: other edits, a different header name, or a block without a
+matching ownership record still require conflict resolution. Unrelated YAML settings and comments
+remain untouched, and the existing snapshot and Restore workflow applies to the upgrade.
 
 ## Preview and confirm changes
 
@@ -375,6 +408,34 @@ catalogs are refused; the existing explicit overwrite and drift-confirmation con
 available. Fully quit and reopen Aside to load changed model files.
 
 
+## ZCode 3.14 and later
+
+ZCode 3.14 moved its custom providers to `~/.zcode/v2/provider_config.json` and left
+`~/.zcode/v2/config.json` reachable only through a one-shot import that runs when the new file is
+missing. ZCode creates the new file the first time it runs, so on any install that has ever been
+launched the import is already spent and a write to `config.json` reaches nothing.
+
+opencodex writes `provider_config.json` directly where it can. Enabling the integration adds the
+`opencodex` provider rule to that file, a catalog refresh updates it, and disabling removes exactly
+what opencodex put there. Every other rule in the file is left alone, including a rule another
+provider keeps for a model id that also appears under ours. A rule carrying the `opencodex` id that
+opencodex did not write is a conflict rather than something to take over; resolve it in ZCode, or
+use the explicit overwrite.
+
+An unreadable or non-file provider store also refuses writes; it is not treated as an absent store that permits the legacy import.
+
+Two other situations still refuse rather than write. A block opencodex applied before ZCode moved its
+store keeps the integration on `config.json`: disable it there first, then enable it again to write
+the new store. And a `provider_config.json` whose `schemaVersion` is not one opencodex has observed
+is reported rather than merged into, because that file holds every provider ZCode has and asserting
+a shape into it would trade a silent no-op for a silent loss. Status names the file ZCode reads
+whenever the integration is not writing it.
+
+In that second case, add the provider in ZCode's own settings: base URL
+`http://127.0.0.1:10100/v1` (adjust the port to your bind), any non-empty key, and the model ids
+from `ocx export --client zcode`. Deleting `provider_config.json` to re-trigger ZCode's import is
+not supported — it discards every provider ZCode keeps there.
+
 ## Cline CLI
 
 This integration targets Cline's current CLI/shared SDK provider store, whose native schema has
@@ -423,3 +484,89 @@ The download `cline-config-bundle.json` contains two native document members: `s
 `providers.json`, and `catalog` for `models.json`. It is not itself a Cline settings file. Prefer
 the integration command for a journaled merge and rollback. Remote admission wiring is not
 supported by this generated integration; it requires unauthenticated loopback access.
+
+## GitHub Copilot App
+
+The GitHub Copilot desktop app can use opencodex as an OpenAI-compatible model provider. This is a
+manual client setup with no Integrations-tab switch, and it is separate from the upstream
+`github-copilot` provider, which uses a Copilot subscription as a backend for opencodex.
+
+1. Start opencodex and confirm it answers:
+
+   ```bash
+   curl http://127.0.0.1:10100/healthz
+   curl http://127.0.0.1:10100/v1/models
+   ```
+
+2. In the Copilot app, open **Settings → Model providers → Add provider** and enter:
+
+   | Field | Value |
+   |---|---|
+   | Name | any label, for example `OpenCodex` |
+   | Base URL | `http://127.0.0.1:10100/v1` (adjust the port to your bind) |
+   | API key | leave blank on loopback |
+
+3. Sync models from the endpoint, or add one by its `provider/model` id, and select it.
+
+The app uses `GET /v1/models` for discovery and `POST /v1/chat/completions` for turns. Those turns
+go through opencodex's normal model routing, so provider credentials, OAuth accounts and combos apply
+as they do for any other client. The accepted request fields are listed in the
+[proxy formats reference](/reference/proxy-formats/).
+
+If the app reports no models, check that the base URL ends in `/v1` rather than
+`/v1/chat/completions` and that `/v1/models` returns a non-empty `data` array. When opencodex
+listens on a non-loopback address, put a data-admission key (the token described under
+[remote access](/reference/configuration/server/#remote-access), or a dashboard-generated `ocx_…`
+key) in the app's API key field. The app sends it as `Authorization: Bearer`, which
+`/v1/chat/completions` accepts as proxy admission and never forwards upstream; see the
+[authentication matrix](/reference/proxy-formats/#authentication-matrix).
+
+## Kilo
+
+Kilo CLI, VS Code, and JetBrains share one global config. This integration writes
+`provider.opencodex` into the first existing file among `kilo.jsonc`, `kilo.json`,
+`opencode.jsonc`, `opencode.json`, and `config.json` under `~/.config/kilo`
+(`XDG_CONFIG_HOME` relocates that directory). If none exist, the destination is
+`kilo.jsonc`. Project configs are never written.
+Kilo merges all of these global files. If another candidate also defines
+`provider.opencodex`, status names every competing file and Apply and Replace refuse;
+remove `provider.opencodex` from those files before enabling the integration. An unreadable or unsafe
+candidate also blocks the write. Disable can still remove a block owned in the recorded file
+while another candidate conflicts or cannot be parsed; the other candidate is left untouched.
+
+The owned fragment is only `provider.opencodex` (OpenCode V1 shape: `npm`, `options`,
+`models`). Kilo's published schema has no OpenCode V2 `providers` key, so that block is
+not emitted. `$schema`, `model`, `enabled_providers`, MCP, and other keys stay
+user-owned. Select `opencodex/<provider/model>` in Kilo after applying.
+
+Loopback uses `{env:OPENCODEX_KILO_API_KEY}` as `options.apiKey`. A non-loopback bind
+moves admission to `options.headers["x-opencodex-api-key"]` and never serializes a real
+key. Apply rewrites the whole global file as pretty JSON, so comments and trailing
+commas in other keys are not preserved. Kilo is not on the implicit catalog fan-out;
+refresh it explicitly after changing the routed model selection.
+
+```bash
+ocx integration client enable --client kilo
+ocx export --client kilo --out ./kilo.jsonc
+```
+
+## Factory Droid
+
+Run Droid once to create `~/.factory`, then explicitly enable this integration with
+`ocx integration client enable --client droid`. OpenCodex adds only documented
+`customModels` entries to your personal `settings.json`, using a keyless local
+Chat Completions endpoint. Choose a row from Droid's `/model` picker. Disable
+removes the managed rows; Undo restores the exact saved file. Other settings and
+custom models remain yours.
+
+Models whose IDs or display names contain `,` or `]` are skipped because the
+managed selector cannot address them safely; export and managed settings show
+the same rows. A nonempty catalog with no addressable models is refused.
+
+Droid also reads legacy `config.json` and local `settings.local.json`. Resolve
+legacy rows that use the OpenCodex endpoint, a generated model ID, or an
+`OpenCodex:` display name, and any local `customModels` override, before enabling;
+OpenCodex refuses those ambiguous settings. It also refuses an
+unsafe target or a row edited since apply. The integration is loopback only and
+never copies provider credentials. Factory documents the [BYOK schema](https://docs.factory.ai/model-independence/byok)
+and [personal settings path](https://docs.factory.ai/droid-cli/settings).

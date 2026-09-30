@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { syncModelsToCodex } from "../../src/codex/sync";
+import { reasoningMetadataMapping } from "../../src/providers/reasoning-metadata";
 import { MANAGED_AGENTS_TABLE_MARKER, MANAGED_SUBAGENT_DEFAULT_MARKER } from "../../src/codex/subagent-defaults";
 import type { OcxConfig } from "../../src/types";
 import type { OrcaCodexHomeDiagnostic } from "../../src/codex/home";
@@ -162,6 +163,83 @@ describe("GUI/CLI Codex sync backend", () => {
     });
     expect(logs).toContain("   Target Codex home: C:\\Users\\[USER]\\.codex");
     expect(errors).toEqual([]);
+  });
+
+  test("a service-home refusal leaves one path-free log line and writes nothing (#5782)", async () => {
+    const privatePath = "/srv/private-operator/.opencodex";
+    const logs: string[] = [];
+    const errors: string[] = [];
+    let refreshed = false;
+    let injected = false;
+    const result = await syncModelsToCodex(12345, config, { log: line => logs.push(String(line)), error: line => errors.push(String(line)) }, {
+      admitCodexWrite: () => ({
+        kind: "refused" as const,
+        authority: "service-home" as const,
+        message: `Refusing to write: a service is installed for OPENCODEX_HOME=${privatePath}.`,
+      }),
+      refreshCodexModelCatalog: async () => {
+        refreshed = true;
+        throw new Error("must not refresh");
+      },
+      injectCodexConfig: async () => {
+        injected = true;
+        return { success: true, message: "must not inject" };
+      },
+      currentExternalCodexModelProvider: () => null,
+    });
+
+    expect(result.status).toBe("refused");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(privatePath);
+    expect(refreshed).toBe(false);
+    expect(injected).toBe(false);
+    expect(logs).toEqual([]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("service-home");
+    expect(errors[0]).toContain("POST /api/sync");
+    expect(errors[0]).not.toContain(privatePath);
+  });
+
+  test("catalog sync proceeds after a bounded reasoning refresh fails on both sync paths", async () => {
+    const calls: string[] = [];
+    const routedConfig = {
+      ...config,
+      providers: {
+        routed: { ...config.providers.fixture, baseUrl: reasoningMetadataMapping()[0]!.destination },
+      },
+    } as OcxConfig;
+    let external = false;
+    const deps = {
+      admitCodexWrite: admittedSync,
+      refreshReasoningMetadata: async (options: { waitMs?: number } = {}) => {
+        expect(options.waitMs).toBe(2_000);
+        calls.push("reasoning");
+        return { ok: false, reason: "wait budget exceeded" };
+      },
+      refreshCodexModelCatalog: async () => {
+        calls.push("catalog");
+        return {
+          added: 1,
+          path: "/tmp/opencodex-catalog.json",
+          catalogExists: true,
+          catalogWritten: true,
+          cacheSynced: true,
+          comboOmissions: [],
+        };
+      },
+      injectCodexConfig: async () => ({ success: true, message: "injected" }),
+      currentExternalCodexModelProvider: () => external ? "custom" : null,
+    };
+
+    const applied = await syncModelsToCodex(12345, routedConfig, null, deps);
+    external = true;
+    const catalogOnly = await syncModelsToCodex(12345, routedConfig, null, deps, {
+      catalogEvenWhenNotInjected: true,
+    });
+
+    expect(applied).toMatchObject({ status: "applied", ok: true, added: 1 });
+    expect(catalogOnly).toMatchObject({ status: "catalog-only", ok: true, added: 1 });
+    expect(calls).toEqual(["reasoning", "catalog", "reasoning", "catalog"]);
   });
 
   test("refuses during injection preflight before catalog or cache mutation", async () => {

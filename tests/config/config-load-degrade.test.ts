@@ -84,6 +84,25 @@ test("config validation accepts only safe provider model display names", () => {
   if (!invalid.ok) expect(invalid.error).toContain("modelDisplayNames");
 });
 
+test("config validation accepts the optional codex pool idle-window setting", () => {
+  const defaults = getDefaultConfig();
+  const enabled = validateConfigCandidate({
+    ...defaults,
+    codexPool: { startIdleWindows: true },
+  });
+  expect(enabled).toMatchObject({
+    ok: true,
+    config: { codexPool: { startIdleWindows: true } },
+  });
+
+  const invalid = validateConfigCandidate({
+    ...defaults,
+    codexPool: { startIdleWindows: "true" },
+  });
+  expect(invalid.ok).toBe(false);
+  if (!invalid.ok) expect(invalid.error).toContain("codexPool.startIdleWindows");
+});
+
 test("load keeps a provider and valid labels when one hand edited label is invalid", () => {
   writeCandidate({
     "grok-4.6": "  Grok 4.6  ",
@@ -365,6 +384,41 @@ test("a malformed credentialGroups entry costs the list, not the rest of pool (#
     expect(loaded.providers.xai.note).toBe("keep me");
     expect(warn.mock.calls.flat().join("\n")).toContain("pool.credentialGroups");
     expect(readFileSync(getConfigPath(), "utf8")).toBe(bytes);
+  } finally { warn.mockRestore(); }
+});
+
+test("a malformed credentialGroups warning never includes operator-supplied identifiers", () => {
+  const pastedCredential = ["opaque", "provider", "credential", "value"].join("-");
+  const privateGroupId = ["private", "billing", "group"].join("-");
+  writePoolConfig([{ id: privateGroupId, credentials: [pastedCredential] }]);
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    expect(loadConfig().pool?.credentialGroups).toBeUndefined();
+    const output = warn.mock.calls.flat().join("\n");
+    expect(output).toContain("provider-qualified");
+    expect(output).toContain("group index 0");
+    expect(output).not.toContain(pastedCredential);
+    expect(output).not.toContain(privateGroupId);
+  } finally { warn.mockRestore(); }
+});
+
+test("every credentialGroups issue shape keeps operator strings out of the warning", () => {
+  // The provider-qualified case above only covers one message template. Duplicate ids,
+  // empty groups, and members listed twice all flow through the same warning join, so
+  // each must be proven identifier-free too.
+  const groupId = ["sensitive", "team", "name"].join("-");
+  const memberId = "anthropic:secret-credential-handle";
+  writePoolConfig([
+    { id: groupId, credentials: [memberId, memberId] },
+    { id: groupId, credentials: [] },
+  ]);
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    expect(loadConfig().pool?.credentialGroups).toBeUndefined();
+    const output = warn.mock.calls.flat().join("\n");
+    expect(output).toContain("pool.credentialGroups");
+    expect(output).not.toContain(groupId);
+    expect(output).not.toContain("secret-credential-handle");
   } finally { warn.mockRestore(); }
 });
 

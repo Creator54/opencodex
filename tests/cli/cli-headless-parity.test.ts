@@ -30,6 +30,9 @@ describe("ocx system codex-restart confirmation", () => {
       const warning = errors.mock.calls.flat().join(" ");
       expect(warning).toContain("requires --yes");
       expect(warning).toContain("fully quits and relaunches the Codex desktop app");
+      expect(warning).toContain("unsaved composer drafts");
+      expect(warning).toContain("model-picker selections");
+      expect(warning).toContain("pending approval prompts");
     } finally { errors.mockRestore(); }
   });
 
@@ -48,6 +51,9 @@ describe("ocx system codex-restart confirmation", () => {
       else {
         expect(text).toContain("Codex desktop app");
         expect(text).toContain("restart requested.");
+        expect(text).toContain("Unsaved composer drafts");
+        expect(text).toContain("model-picker selections");
+        expect(text).toContain("pending approval prompts");
         expect(text).not.toContain("restarted");
       }
     } finally { output.mockRestore(); }
@@ -135,12 +141,74 @@ describe("ocx system settings desktop switches", () => {
     }
   });
 
+  test("reports externally owned switch and authentication state without claiming a rewrite", async () => {
+    const { deps } = fakeRuntime(() => ({
+      ok: true,
+      codexDesktopSwitches: {
+        codexDesktopAuthless: { stored: true, effective: null },
+        codexClientCompaction: { stored: false, effective: null },
+        apply: { applied: false, reason: "external_provider", retryable: false },
+        authSource: {
+          presentsCodexAccount: null,
+          summary: "An external model provider owns Codex sign-in behavior; its account requirement was not changed.",
+        },
+      },
+    }));
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(await handleSystemCommand(["settings", "--desktop-authless", "on"], deps)).toBe(0);
+      const output = logSpy.mock.calls.flat().join("\n");
+      expect(output).toContain("effective state is controlled by the external model provider");
+      expect(output).toContain("was not rewritten because an external model provider owns config.toml");
+      expect(output).toContain("Auth source: An external model provider owns Codex sign-in behavior");
+      expect(output).not.toContain("was rewritten.");
+      expect(output).not.toContain("ocx sync");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
   test("keeps the legacy success line when an older server omits the switch report", async () => {
     const { deps } = fakeRuntime((_req, body) => ({ ok: true, ...body }));
     const logSpy = spyOn(console, "log").mockImplementation(() => {});
     try {
       expect(await handleSystemCommand(["settings", "--desktop-authless", "on"], deps)).toBe(0);
       expect(logSpy.mock.calls.flat().join("\n")).toBe("System settings updated.");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  test("reports undetermined ownership without claiming external control", async () => {
+    const { deps } = fakeRuntime(() => ({
+      ok: true,
+      codexDesktopSwitches: {
+        codexDesktopAuthless: { stored: true, effective: null },
+        codexClientCompaction: { stored: false, effective: null },
+        apply: {
+          applied: false,
+          reason: "ownership_undetermined",
+          retryable: true,
+          detail: "config.toml ownership could not be determined: EACCES",
+        },
+        authSource: {
+          presentsCodexAccount: null,
+          summary: "Whether the Codex app requires its own account sign-in is undetermined; config.toml ownership could not be read.",
+        },
+      },
+    }));
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(await handleSystemCommand(["settings", "--desktop-authless", "on"], deps)).toBe(0);
+      const output = logSpy.mock.calls.flat().join("\n");
+      expect(output).toContain("effective state could not be determined");
+      expect(output).toContain("was not rewritten because config.toml ownership could not be determined");
+      expect(output).toContain("Auth source: Whether the Codex app requires its own account sign-in is undetermined");
+      expect(output).not.toContain("controlled by the external model provider");
+      // Observation can recover while integration stays disabled; sync cannot inject then.
+      expect(output).not.toContain("ocx sync");
+      expect(output).toContain("ocx system settings --json");
+      expect(output).toContain("Resolve the reported config.toml read error");
     } finally {
       logSpy.mockRestore();
     }
@@ -306,6 +374,89 @@ describe("ocx agent sidecar --list (#2188)", () => {
       logSpy.mockRestore();
     }
   });
+
+  test("web --enabled off stores the switch and reports the Codex-side write in the Desktop switches' words", async () => {
+    const { requests, deps } = fakeRuntime((req, body) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/api/sidecar-settings" && req.method === "PUT") {
+        expect(body).toEqual({ webSearch: { enabled: false } });
+        return {
+          ok: true,
+          webSearch: { enabled: false },
+          // The route reports the injection it ran; a refusal has to read like every other one.
+          codexWebSearch: {
+            applied: false,
+            reason: "write_lock_busy",
+            retryable: true,
+            detail: "another Codex config writer owns the lock",
+          },
+        };
+      }
+      return undefined;
+    });
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(await handleAgentCommand(["sidecar", "web", "--enabled", "off"], deps)).toBe(0);
+      expect(requests).toEqual([
+        { path: "/api/sidecar-settings", method: "PUT", body: { webSearch: { enabled: false } } },
+      ]);
+      const out = logSpy.mock.calls.map(call => String(call[0])).join("\n");
+      expect(out).toContain("web sidecar settings updated.");
+      expect(out).toContain("Codex config: ~/.codex/config.toml was not rewritten because the Codex config write lock is busy.");
+      expect(out).toContain("Details: another Codex config writer owns the lock");
+      expect(out).toContain("Run 'ocx sync' to apply the stored settings.");
+      // The internal reason code stays out of the human line.
+      expect(out).not.toContain("write_lock_busy");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  test("a report the server did not treat as a switch move adds no Codex line", async () => {
+    const { deps } = fakeRuntime((req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/api/sidecar-settings" && req.method === "PUT") {
+        return { ok: true, webSearch: { enabled: false }, codexWebSearch: { applied: false, reason: "not_requested", retryable: false } };
+      }
+      return undefined;
+    });
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(await handleAgentCommand(["sidecar", "web", "--enabled", "off"], deps)).toBe(0);
+      const out = logSpy.mock.calls.map(call => String(call[0])).join("\n");
+      expect(out).toBe("web sidecar settings updated.");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  test("an externally owned Codex config gets no 'ocx sync' retry advice", async () => {
+    const { deps } = fakeRuntime((req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/api/sidecar-settings" && req.method === "PUT") {
+        return {
+          ok: true,
+          webSearch: { enabled: false },
+          codexWebSearch: {
+            applied: false,
+            reason: "external_provider",
+            retryable: false,
+            detail: 'config.toml selects the external model_provider "custom".',
+          },
+        };
+      }
+      return undefined;
+    });
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(await handleAgentCommand(["sidecar", "web", "--enabled", "off"], deps)).toBe(0);
+      const out = logSpy.mock.calls.map(call => String(call[0])).join("\n");
+      expect(out).toContain("was not rewritten because an external model provider owns config.toml");
+      expect(out).not.toContain("ocx sync");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
 });
 
 afterEach(() => {
@@ -404,6 +555,7 @@ describe("headless GUI parity CLI", () => {
       ["/api/logs", "ocx observe"],
       ["/api/lab", "ocx lab"],
       ["/api/config", "ocx config"],
+      ["/api/companion", "ocx companion"],
       // The client machine plane. These are served by the connected client's own loopback
       // listener rather than the hub, and each one mirrors a connect-family command:
       // status/clients -> `ocx connect status`, sync -> `ocx sync`, shim -> the client
@@ -415,6 +567,10 @@ describe("headless GUI parity CLI", () => {
       // inventory and writes one config key. There is no headless equivalent
       // today, and claiming one would be worse than saying so here.
       ["/api/codex-prompt", "(none — GUI prompt-layer surface; keys live in config.toml)"],
+      // Claude reset grants: reading is an owed CLI verb (deferred-verb in the route
+      // registry) and spending is dashboard-session-only by design.
+      ["/api/anthropic/reset-grants", "(none — GUI reset-grant dialog; spend requires a dashboard session)"],
+      ["/api/protocols", "ocx api protocols/explain/policy"],
       ["/api/settings", "ocx system"],
       // Routing Intelligence (RI-04..RI-10): profiles + dry-run are mirrored by
       // `ocx route policy`. Analytics is GUI-first for now; the same request
@@ -427,6 +583,10 @@ describe("headless GUI parity CLI", () => {
       // the management route registry land. Naming the family here does not claim those
       // local and Hub status payloads are equivalent.
       ["/api/remote-workspace", "ocx remote-workspace"],
+      // Remote Link: status and revoke are `ocx link status|revoke`. Candidates, probe, host
+      // confirmation, and apply are the dashboard's guided pairing; the headless route is
+      // `ocx link port|issue` plus `ocx connect --link`, which the apply flow drives over SSH.
+      ["/api/link", "ocx link"],
       ["/api/shadow", "ocx models"],
       ["/api/sidecar", "ocx agent"],
       ["/api/startup", "ocx system"],
@@ -471,6 +631,16 @@ describe("headless GUI parity CLI", () => {
     const runtime = fakeRuntime();
     expect(await handleProviderRuntimeCommand("edit", args, runtime.deps)).toBe(2);
     expect(runtime.requests).toHaveLength(0);
+  });
+
+  test("provider edit sends only validated Copilot context tiers", async () => {
+    const { requests, deps } = fakeRuntime();
+    expect(await handleProviderRuntimeCommand("edit", ["github-copilot", "--model-context-tier", "gpt-5.6-luna=long_context", "--model-context-tier", "gpt-5.5=default"], deps)).toBe(0);
+    expect(requests).toEqual([{ path: "/api/providers?name=github-copilot", method: "PATCH",
+      body: { modelContextTiers: { "gpt-5.6-luna": "long_context", "gpt-5.5": "default" } } }]);
+    expect(await handleProviderRuntimeCommand("edit", ["github-copilot", "--model-context-tier", "gpt-5.5=wide"], deps)).toBe(2);
+    expect(await handleProviderRuntimeCommand("edit", ["openai", "--model-context-tier", "gpt-5.5=default"], deps)).toBe(2);
+    expect(requests).toHaveLength(1);
   });
 
   test("provider edit --headers sends the parsed block and - clears it", async () => {
@@ -635,6 +805,24 @@ describe("headless GUI parity CLI", () => {
         targets: [
           { provider: "ark", model: "model-a", weight: 2 },
           { provider: "openai", model: "gpt-5.5" },
+        ],
+      },
+    });
+  });
+
+  test("combo set accepts the jev strategy without changing target order", async () => {
+    const runtime = fakeRuntime();
+    const code = await handleComboCommand([
+      "set", "jev-auto", "--targets", "openai/gpt-6-astra,openai/gpt-5.6-sol", "--strategy", "jev", "--json",
+    ], runtime.deps);
+    expect(code).toBe(0);
+    expect(runtime.requests.find(request => request.method === "PUT")?.body).toMatchObject({
+      id: "jev-auto",
+      combo: {
+        strategy: "jev",
+        targets: [
+          { provider: "openai", model: "gpt-6-astra" },
+          { provider: "openai", model: "gpt-5.6-sol" },
         ],
       },
     });
@@ -1296,4 +1484,25 @@ test("provider edit rejects incomplete text-only targeting before contacting the
     }
     expect(requests).toHaveLength(0);
   } finally { error.mockRestore(); }
+});
+
+describe("ownership recovery advice does not assume injection is enabled", () => {
+  for (const reason of ["ownership_undetermined", "integration_disabled"]) {
+    test(`sidecar ${reason} does not promise sync will apply settings`, async () => {
+      const { requests, deps } = fakeRuntime(() => ({
+        ok: true, codexWebSearch: { applied: false, reason, retryable: true },
+      }));
+      const log = spyOn(console, "log").mockImplementation(() => {});
+      try {
+        expect(await handleAgentCommand(["sidecar", "web", "--enabled", "on"], deps)).toBe(0);
+        expect(requests).toHaveLength(1);
+        const text = log.mock.calls.flat().join("\n");
+        expect(text).toContain("was not rewritten");
+        expect(text).not.toContain("ocx sync");
+        if (reason === "ownership_undetermined") expect(text).toContain("Resolve the reported config.toml read error");
+        expect(text).toContain(reason === "ownership_undetermined"
+          ? "ocx system settings --json" : "Enable Codex integration");
+      } finally { log.mockRestore(); }
+    });
+  }
 });

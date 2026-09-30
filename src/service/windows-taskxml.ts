@@ -1,3 +1,4 @@
+import { WINDOWS_WRAPPER_PROTOCOL_ENV, WINDOWS_WRAPPER_STAY_OUT_EXIT_CODE } from "./windows-wrapper-exit";
 import { readFileSync } from "node:fs";
 import { TASK, windowsServiceScriptPath, windowsLauncherVbsPath, windowsTaskXmlPath } from "./state";
 import { windowsWscript } from "./windows-scheduler";
@@ -7,7 +8,7 @@ import { serviceApiTokenFilePath } from "../lib/service-secrets";
 import { windowsEnvIndirectBatchPathList, windowsEnvIndirectBatchValue } from "../lib/win-paths";
 import { cachedCurrentWindowsIdentity, resolveCurrentWindowsPrincipal, WINDOWS_PRINCIPAL_LOOKUP_TIMEOUT_MS } from "../lib/windows-user-principal";
 import { resolveServiceListenPort, resolvedProxyEnv } from "./health";
-import { cliEntry, serviceLogPath, currentCodexSqliteHomeAbsolute } from "./state";
+import { cliEntry, filterTransientServicePath, serviceLogPath, currentCodexSqliteHomeAbsolute } from "./state";
 
 function windowsBatchValue(value: string): string {
   return value
@@ -61,14 +62,16 @@ export function buildWindowsServiceScript(
   // Provenance rides along with the entry: a second durableBunRuntime() call here could
   // resolve differently from the binary the caller actually baked.
   const { bun, bunRuntimeSource, cli } = entry;
-  const path = process.env.PATH ?? "";
+  const path = filterTransientServicePath(process.env.PATH ?? "", ";", "win32");
   const lines = [
     "@echo off",
-    "setlocal",
+    "setlocal EnableExtensions DisableDelayedExpansion",
+    'set "ERRORLEVEL="',
     // The wrapper console is hidden by the wscript launcher (window style 0), so switching
     // it to UTF-8 is safe (no leak into user shells) and lets cmd parse UTF-8 remnants.
     "chcp 65001 >nul",
     windowsBatchSet("OCX_SERVICE", "1"),
+    windowsBatchSet(WINDOWS_WRAPPER_PROTOCOL_ENV, "1"),
     windowsBatchSet(BUN_RUNTIME_SOURCE_ENV, bunRuntimeSource),
     windowsBatchSet(BUN_RUNTIME_PATH_ENV, bun, "path"),
     windowsBatchSet("PATH", path, "pathList"),
@@ -79,10 +82,11 @@ export function buildWindowsServiceScript(
     windowsBatchSet("OCX_API_TOKEN_FILE", serviceApiTokenFilePath(), "path"),
     windowsBatchSet("OCX_SERVICE_LOG", serviceLogPath(), "path"),
     windowsBatchSet("OCX_BUN", bun, "path"),
-    windowsBatchSet("OCX_CLI", cli, "path"),
+    windowsBatchSet("OCX_CLI", cli ?? undefined, "path"),
+    // Standalone executables have no npm package tree; recovery is "replace the executable", so no OCX_PKG_DIR/restore_backup wiring.
     // Package root for the transactional-update restore path (#1942): cli is
     // <pkg>\src\cli\index.ts, so the package dir is three levels up.
-    'for %%I in ("%OCX_CLI%\\..\\..\\..") do set "OCX_PKG_DIR=%%~fI"',
+    cli ? 'for %%I in ("%OCX_CLI%\\..\\..\\..") do set "OCX_PKG_DIR=%%~fI"' : null,
     'if exist "%OCX_API_TOKEN_FILE%" (',
     '  set /p OPENCODEX_API_AUTH_TOKEN=<"%OCX_API_TOKEN_FILE%"',
     ")",
@@ -101,23 +105,24 @@ export function buildWindowsServiceScript(
     '  >>"%OCX_SERVICE_LOG%" echo [%DATE% %TIME%] installation is incomplete: bundled Bun is missing; reinstall opencodex, then run ocx service repair',
     "  exit /b 3",
     ")",
-    'if not exist "%OCX_CLI%" (',
-    "  call :restore_backup",
-    ")",
-    'if not exist "%OCX_CLI%" (',
-    '  >>"%OCX_SERVICE_LOG%" echo [%DATE% %TIME%] installation is incomplete: CLI entry is missing; reinstall opencodex, then run ocx service repair',
-    "  exit /b 3",
-    ")",
-    `"%OCX_BUN%" "%OCX_CLI%" start --port ${port} >>"%OCX_SERVICE_LOG%" 2>&1`,
-    "if %ERRORLEVEL% NEQ 0 (",
-    '  >>"%OCX_SERVICE_LOG%" echo [%DATE% %TIME%] child exited with code %ERRORLEVEL%; restarting in 5s',
+    cli ? 'if not exist "%OCX_CLI%" (' : null,
+    cli ? "  call :restore_backup" : null,
+    cli ? ")" : null,
+    cli ? 'if not exist "%OCX_CLI%" (' : null,
+    cli ? '  >>"%OCX_SERVICE_LOG%" echo [%DATE% %TIME%] installation is incomplete: CLI entry is missing; reinstall opencodex, then run ocx service repair' : null,
+    cli ? "  exit /b 3" : null,
+    cli ? ")" : null,
+    cli ? `"%OCX_BUN%" "%OCX_CLI%" start --port ${port} >>"%OCX_SERVICE_LOG%" 2>&1` : `"%OCX_BUN%" start --port ${port} >>"%OCX_SERVICE_LOG%" 2>&1`,
+    // Stop commands kill the wrapper; a zero child exit alone is not a stop request.
+    `if "%ERRORLEVEL%"=="${WINDOWS_WRAPPER_STAY_OUT_EXIT_CODE}" goto stopped`,
+    '>>"%OCX_SERVICE_LOG%" echo [%DATE% %TIME%] child exited with code %ERRORLEVEL%; restarting in 5s',
     // `timeout` needs console stdin and dies with "Input redirection is not supported"
     // under Task Scheduler, turning the 5s cooldown into a hot restart loop; ping doesn't.
-    "  ping -n 6 127.0.0.1 >nul",
-    "  goto loop",
-    ")",
+    "ping -n 6 127.0.0.1 >nul",
+    "goto loop",
+    ":stopped",
     "endlocal",
-    "goto :eof",
+    "exit /b 0",
     "",
     // #1942/#1849: a power loss mid-swap leaves the live package dir missing/broken and
     // a sibling .ocx-backup-* holding the previous version. This wrapper lives OUTSIDE
@@ -422,6 +427,25 @@ function taskXmlDecodedLossyValueEquals(xml: string, tag: string, expected: stri
   return taskXmlLossyValueEquals(taskXmlDecodeEntities(value), expected);
 }
 
+/** Accept only the single Exec action emitted for this launcher's task. */
+export function windowsTaskActionMatches(
+  xml: string,
+  launcher: string,
+  wscript = windowsWscript(),
+  allowLossyPaths = false,
+): boolean {
+  const scrubbed = taskXmlWithoutCommentsAndCdata(xml);
+  if (taskXmlElementCount(scrubbed, "Data") > 0 || taskXmlHasPrefixedTag(scrubbed, "Data")
+    || taskXmlHasPrefixedTag(scrubbed, "Actions") || taskXmlHasPrefixedTag(scrubbed, "Exec")
+    || taskXmlElementCount(scrubbed, "Actions") !== 1 || taskXmlElementCount(scrubbed, "Exec") !== 1) return false;
+  const actions = taskXmlSection(scrubbed, "Actions");
+  const exec = /<Exec(?:\s[^>]*)?>([\s\S]*?)<\/Exec>/i.exec(actions);
+  if (!exec || actions.replace(exec[0], "").trim() !== "") return false;
+  const equals = allowLossyPaths ? taskXmlDecodedLossyValueEquals : taskXmlDecodedValueEquals;
+  return equals(exec[1]!, "Command", wscript)
+    && equals(exec[1]!, "Arguments", `/b /nologo "${launcher}"`);
+}
+
 export function taskXmlOptionalValueEquals(xml: string, tag: string, expected: string): boolean {
   // Check the prefixed form first: treating `<t:Enabled>false</t:Enabled>` as an
   // omission would turn an explicitly disabled task into a healthy one.
@@ -515,7 +539,6 @@ function windowsTaskRegistrationBaseHealthy(
   const trigger = taskXmlSection(triggers, "LogonTrigger");
   const principal = taskXmlSection(scrubbed, "Principal");
   const settings = taskXmlSection(scrubbed, "Settings");
-  const action = taskXmlSection(scrubbed, "Exec");
   // A self-closing <LogonTrigger /> leaves an empty section, so look for the element
   // itself — scoped to <Triggers> so a decoy elsewhere cannot satisfy it.
   return taskXmlElementCount(triggers, "LogonTrigger") > 0
@@ -533,11 +556,7 @@ function windowsTaskRegistrationBaseHealthy(
     // cannot carry when the profile is named outside the code page (#3064). Only
     // unrepresentable characters are forgiven; every ASCII segment and every
     // separator is still matched literally.
-    && (allowLossyPaths
-      ? taskXmlDecodedLossyValueEquals(action, "Command", wscript)
-        && taskXmlDecodedLossyValueEquals(action, "Arguments", `/b /nologo "${launcher}"`)
-      : taskXmlDecodedValueEquals(action, "Command", wscript)
-        && taskXmlDecodedValueEquals(action, "Arguments", `/b /nologo "${launcher}"`));
+    && windowsTaskActionMatches(xml, launcher, wscript, allowLossyPaths);
 }
 
 /** Validate the security/lifecycle-critical fields of the registered scheduler task. */

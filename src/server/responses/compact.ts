@@ -1,4 +1,10 @@
 import { capturePoolQuotaWriter } from "../../codex/account-store";
+import {
+  admissionModelDeniedResponse,
+  AdmissionModelDeniedError,
+  assertRouteAllowedByScope,
+  resolveAdmissionModelScope,
+} from "../admission-model-scope";
 import type { Server } from "bun";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
 import {
@@ -45,6 +51,7 @@ import { describeImagesInPlace, planVisionSidecar, shouldResolveOpenAiVisionSide
 import { createAdapterEventQueue, preflightAdapterEvents } from "../../adapters/run-turn-queue";
 import {
   applyCodexAuthContextToProvider,
+  callerCodexWorkspaceAccountId,
   createCodexReserveDispatchGuard,
   unwrapUpstreamRetryEvidenceError,
   CodexMainProfileDrainingError,
@@ -147,7 +154,8 @@ import { codexAccountSelectionForTurn, registerTurn, trackStreamLifetime, unregi
 import type { AdmissionLease } from "../../lib/admission";
 import { redactSecretString } from "../../lib/redact";
 import { readBoundedResponseBytes } from "../../lib/bounded-body";
-import { resolveStallTimeoutSec } from "../../stall-timeout";
+import { resolveStallTimeoutMs } from "../../stall-timeout";
+import { isLocalUpstream } from "../../lib/local-upstream";
 import { isRateLimitOrQuotaFailureMessage } from "../../lib/errors";
 import { supportedLadderFor } from "../effort-policy";
 import {
@@ -180,6 +188,7 @@ import {
   handleResponses,
   preAuthUpstreamHostCircuitKey,
   poolCredentialRefreshIncompleteResponse,
+  shouldRetryCodexScopedQuotaOnAlternate,
   upstreamHostCircuitOpenResponse,
   usesCodexForwardPoolAuth,
 } from "./core";
@@ -554,6 +563,7 @@ export async function bufferCompactResponse(
   upstream: Response,
   signal: AbortSignal,
   stallTimeoutSec?: number,
+  localUpstream?: boolean,
 ): Promise<Response> {
   const headers = compactResponseHeaders(upstream);
   try {
@@ -573,7 +583,9 @@ export async function bufferCompactResponse(
     const result = await readBoundedResponseBytes(upstream, {
       signal,
       maxBytes: COMPACT_RESPONSE_MAX_BYTES,
-      inactivityTimeoutMs: resolveStallTimeoutSec(stallTimeoutSec) * 1_000,
+      // Compaction buffers the complete body while holding an active-turn lease. Keep its
+      // default bounded even for local destinations so silent bodies cannot exhaust that gate.
+      inactivityTimeoutMs: resolveStallTimeoutMs(stallTimeoutSec),
     });
     if (signal.aborted) return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");
     if (result.oversized) return compactResponseTooLargeError();
@@ -655,7 +667,12 @@ export async function handleResponsesCompact(
     // routes ordinary turns elsewhere (#2901); the compaction-scoped router
     // may land that on the configured default provider instead of 404.
     route = routeCompactionModel(config, compactModel, evidenceFromBody(raw));
+    // A compaction override picks the model, not the caller, so the key's scope
+    // is applied to what the override resolved to rather than to the selector
+    // the client sent.
+    assertRouteAllowedByScope(resolveAdmissionModelScope(config, admission), compactRequestedModel, route);
   } catch (err) {
+    if (err instanceof AdmissionModelDeniedError) return admissionModelDeniedResponse(err);
     if (err instanceof NoEligiblePolicyCandidateError) {
       // Persist the evaluation trace (per-candidate exclusions + the
       // no-eligible reason) so a failed compact policy request stays
@@ -698,6 +715,7 @@ export async function handleResponsesCompact(
     captureOpenAiVirtualWirePolicy(route, virtual);
     logCtx.model = virtual.selectedModelId;
     logCtx.resolvedModel = virtual.wireModelId;
+    logCtx.wireModel = virtual.wireModelId;
   } else {
     logCtx.resolvedModel = route.modelId;
   }
@@ -1200,9 +1218,36 @@ export async function handleResponsesCompact(
       if (alternate && req.signal.aborted) {
         releaseCodexAuthContextProbeLease(alternate.authCtx);
         recordCompactPoolOutcome(outcomeCtx, 499);
+        void upstream.body?.cancel(req.signal.reason).catch(() => undefined);
         return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");
       }
-      if (alternate) {
+      // The same scope binding the regular path applies: an organization-scoped
+      // exhaustion refuses every credential in that workspace, so a proven
+      // same-workspace alternate pays a cold prompt prefix for no new capacity.
+      // Suppression is not silence — the buffered recorder below still attributes
+      // the 429/402 to the account that produced it.
+      const sharedWorkspaceScope = alternate != null
+        && !await shouldRetryCodexScopedQuotaOnAlternate(
+          upstream,
+          authCtx.chatgptAccountId,
+          alternate.authCtx.kind === "pool" || alternate.authCtx.kind === "main-pool"
+            ? alternate.authCtx.chatgptAccountId
+            : callerCodexWorkspaceAccountId(req.headers),
+          req.signal,
+        );
+      // The scope check reads the rejection body asynchronously — the same window the
+      // comment above covers. Re-check before the branch below records A, cancels its
+      // body, and sends B for a caller that is gone.
+      if (alternate && req.signal.aborted) {
+        releaseCodexAuthContextProbeLease(alternate.authCtx);
+        recordCompactPoolOutcome(outcomeCtx, 499);
+        void upstream.body?.cancel(req.signal.reason).catch(() => undefined);
+        return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");
+      }
+      if (alternate && sharedWorkspaceScope) {
+        releaseCodexAuthContextProbeLease(alternate.authCtx);
+      }
+      if (alternate && !sharedWorkspaceScope) {
         // Same order the regular path uses (core.ts:349-357): a 429/402 carries the
         // quota snapshot that produced it, so refresh A's cache before recording its
         // rejection. Skipping this leaves quota-strategy routing and the dashboard
@@ -1291,7 +1336,7 @@ export async function handleResponsesCompact(
       upstream.headers.get("x-codex-secondary-reset-at"),
       upstream.headers.get("x-codex-tertiary-reset-at"),
     ].filter(Boolean);
-    const buffered = await bufferCompactResponse(upstream, req.signal, config.stallTimeoutSec);
+    const buffered = await bufferCompactResponse(upstream, req.signal, config.stallTimeoutSec, isLocalUpstream(compactUrl));
     const bufferedErrorText = buffered.ok
       ? ""
       : await buffered.clone().text().catch(() => "");
@@ -1390,7 +1435,7 @@ export async function handleResponsesCompact(
   // The routed compaction turn is a handoff inside the same logical request, so it draws the
   // REMAINDER. Minting here is what let a native attempt spend three sends and the routed
   // fallback spend four more.
-  const response = await handleResponses(internalReq, config, logCtx, { abortSignal: req.signal, turnAdmissionLease, sendBudget, compactionRoutingOverride: options.compactionRoutingOverride, ...(admission ? { admission } : {}) });
+  const response = await handleResponses(internalReq, config, logCtx, { abortSignal: req.signal, turnAdmissionLease, sendBudget, compactionRecoveryKind: "compaction-v1", compactionRoutingOverride: options.compactionRoutingOverride, ...(admission ? { admission } : {}) });
   if (!response.ok) return response;
   let json: { output?: unknown[]; status?: unknown; error?: unknown };
   if (response.headers.get("content-type")?.includes("text/event-stream")) {

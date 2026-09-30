@@ -18,7 +18,16 @@ yüzeyleri](/tr/guides/sub-agent-surface/) sayfasına bakın.
 
 ```bash
 ocx agent subagents set ark/model-a,openai/gpt-5.5
+ocx agent sidecar web --enabled off
 ```
+
+`--enabled off`, kontrol panelindeki **Kapalı (Off)** satırıyla aynı anahtardır: OpenCodex
+sidecar'ı çalıştırmayı bırakır ve Codex entegrasyonu `~/.codex/config.toml` dosyasına
+`web_search = "disabled"` yazar; tek arama yolu olarak bir MCP arama sunucusunun kullanılmasını bu
+sağlar. `--enabled on` bu satırı yeniden kaldırır. Kaydetme anahtarı gerçekten değiştirdiğinde
+komut tetiklediği Codex tarafı yazmayı bildirir (`--json` içinde `codexWebSearch`, aksi
+halde son satırda `Codex config:`) ve yazma yapılamadığında `ocx sync` adresini gösterir.
+Bayrak `vision` için de çalışır.
 
 ### `ocx v2 <status|on|off|mode <v1|default|v2>|threads <n>|mode-hint <text|--clear>>`
 
@@ -193,7 +202,7 @@ Grok Build model çitini yönetin ve uygulayın.
 
 ## İstemci yapılandırma dışa aktarma
 
-### `ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside|raycast|omo>`
+### `ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside|raycast|omo|cline|kilo|droid>`
 
 Çalışan proxy'ye bağlı bir istemci yapılandırmasını yazdırın. Komut, `opencodex`
 sağlayıcı bloğunu — temel URL, model listesi ve istemcinin kimlik bilgisi
@@ -205,7 +214,7 @@ yalnızca Codex'in şu anda görebildiği modelleri yayınlar.
 
 | Bayrak | Eylem |
 | --- | --- |
-| `--client <opencode\|pi\|omp\|hermes\|openclaw\|kimi\|gajae\|dsh\|mcode\|zcode\|prime\|aside\|raycast\|omo>` | Gerekli. İstemci yapılandırma lehçesini seçer. |
+| `--client <opencode\|pi\|omp\|hermes\|openclaw\|kimi\|gajae\|dsh\|mcode\|zcode\|prime\|aside\|raycast\|omo\|cline\|kilo\|droid>` | Gerekli. İstemci yapılandırma lehçesini seçer. |
 | `--json` | Betikler için stdout üzerinde oluşturulan belgeyi JSON olarak yazdırın. Bu, seçilen istemcinin yerel formatı YAML, TOML veya JSON5 olsa bile JSON'dur. |
 | `--out <path>` | İstemcinin yerel yapılandırma formatını `<path>` konumuna yazın. Mevcut bir dosyanın üzerine yazmayı reddeder. |
 | `--force` | `--out`'un mevcut bir dosyanın üzerine yazmasına izin verin. |
@@ -238,6 +247,8 @@ için kendi varsayılanlarını uygular) gelir.
 | `aside` | Aside'ın kendi `accounts.json` dosyasının güncel olarak gösterdiği hesap için `~/.aside/u/<account>/models.json`; okunamayan bir manifest, gelişigüzel bir hesaba düşmek yerine reddedilir | `aside-models.json` | yok — geri döngü yer tutucusu |
 | `raycast` | `~/.config/raycast/ai/providers.yaml`, macOS ve Windows'ta aynı (Raycast `XDG_CONFIG_HOME` değerini dikkate almaz) | `raycast-providers.yaml` | yok — yalnızca geri döngü, `api_keys` girdisi yazılmaz |
 | `omo` | `~/.omo/agent/models.json` (ayarlandığında sırasıyla `OMO_CODING_AGENT_DIR`, `SENPI_CODING_AGENT_DIR`, `PI_CODING_AGENT_DIR` öncelikli; göreli değer reddedilir) | `omo-models.json` | yok — geri döngü yer tutucusu |
+| `kilo` | `~/.config/kilo` altında ilk bulunan `kilo.jsonc`, `kilo.json`, `opencode.jsonc`, `opencode.json` veya `config.json` (`XDG_CONFIG_HOME` bu dizini taşır); hiçbiri yoksa `kilo.jsonc` kullanılır | `kilo.jsonc` | `OPENCODEX_KILO_API_KEY` |
+| `droid` | `~/.factory/settings.json` (`%USERPROFILE%\.factory\settings.json` on Windows) | `factory-settings.json` | yalnızca loopback; ortam değişkeni gerekmez |
 
 Raycast dışa aktarımı, `providers` dizisinde tek bir `id: opencodex` öğesi içeren bağımsız
 bir `providers.yaml` belgesidir: `name: OpenCodex`, proxy'nin `/v1` temel URL'si ve
@@ -271,7 +282,7 @@ referansı veya gizli olmayan bir geri döngü yer tutucusu taşır. Bir geri d�
 proxy'si (`127.0.0.1`, varsayılan) hiçbir kabul anahtarı gerektirmez. Referans
 verilen bir değişkeni yalnızca istemci şeması desteklediğinde ve proxy geri
 döngünün ötesine bağlandığında ayarlayın; kabul anahtarlarının nasıl verildiğini
-görmek için [Uzaktan erişim](/tr/reference/configuration/#remote-access)
+görmek için [Uzaktan erişim](/tr/reference/configuration/server/#uzaktan-erişim)
 bölümüne bakın. Yukarı akış sağlayıcılarının kendi anahtarları tamamen ayrı bir
 şeydir ve [Sağlayıcılar](/tr/guides/providers/) bölümüne göre yapılandırılır.
 Oluşturulan gjc entegrasyonu gizli olmayan bir loopback yer tutucusu kullanır; ortam değişkeni gerekmez. Yalnızca loopback desteklenir, uzak erişim kimlik bilgileri yapılandırılmaz.

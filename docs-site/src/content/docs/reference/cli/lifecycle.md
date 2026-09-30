@@ -27,7 +27,17 @@ would leave the first proxy running and re-point Codex at the second. An explici
 and enforced spend accounting both write the same journal. Use a separate `OPENCODEX_HOME` for an
 independent sibling; `port: 0` only asks the OS for that instance's port and does not separate its
 state. On start it syncs each provider's models into Codex's catalog. On shutdown it restores
-native Codex — unless it was launched as a managed service (`OCX_SERVICE=1`).
+native Codex — unless it was launched as a managed service (`OCX_SERVICE=1`). A sibling started
+beside a running proxy does neither: it serves direct requests on its own port only, and Codex,
+Grok and Claude stay pointed at the proxy that was already running. With a separate
+`OPENCODEX_HOME`, startup checks the default home's runtime record and managed Grok and
+Codex loopback destinations for a live opencodex owner before syncing. A custom home with
+no live owner still syncs normally; explicit `ocx sync` and `ocx grok apply` remain available.
+Stopping that sibling with `ocx stop` or a signal leaves their configuration alone as well. While it runs, the proxy also
+keeps Codex pointed at itself: when the opencodex routing in `~/.codex/config.toml` names another
+local port where no opencodex has answered for about 20 seconds (an instance that re-pointed it and
+then died, for example), the proxy re-points Codex at its own port and prints one warning. Codex
+threads opened in the meantime keep the dead address until you reopen them.
 
 `--socks5` (default `127.0.0.1:10808`) saves `config.proxy` as a SOCKS5 URL and routes outbound
 HTTP(S) through a real SOCKS5 tunnel. `--socks5-off` clears only that saved SOCKS5 proxy; it
@@ -42,10 +52,15 @@ ocx start --port 10100 --socks5
 ocx start --socks5-off
 ```
 
-### `ocx stop`
+### `ocx stop [--json]`
 
 Stop the running proxy (by PID), remove the PID file, and restore native Codex. If a managed
 background service is installed, `ocx stop` also stops it first so it cannot respawn the proxy.
+While the OpenCodex desktop app is running, `ocx stop` does not keep the proxy down: the app treats
+it as an unexpected exit and starts a proxy again, within seconds for one it started and after about
+a minute for one it had only attached to. Use the app's tray **Stop proxy** (for a proxy the app
+started) or **Quit** to keep it stopped. For the same reason the dashboard's **Stop** button refuses
+with `desktop_supervised`, and changes nothing, for a proxy the app started.
 The web dashboard's **Stop** button runs the same action (`POST /api/stop`) on every backend
 except Windows Task Scheduler. There the wrapper can respawn the proxy after the task ends,
 and only a stop running outside the proxy can verify that restart window before restoring
@@ -65,16 +80,64 @@ It does not enter the forced-stop fallback for a process already observed to hav
 receipt-backed deferral still leaves final restoration and receipt cleanup with the parent;
 failure to restore shared client configuration keeps the stop failed and its receipt outstanding.
 
+`ocx stop --json` runs exactly the same stop path and prints one versioned summary document
+(`schema: "ocx-stop/1"`) on stdout, while the human progress lines move to stderr. The summary
+carries the outcome class (`stopped`, `not-running`, `history-incomplete`, `history-deferred`,
+or `failed`), the service and proxy classifications, whether the runtime is down, and a stable
+one-line message. Exit codes are identical with and without `--json`: 0 on success, 1 on failure,
+79 when only Codex history cleanup did not complete, and 80 when the shared teardown was deferred
+and is still owed.
+
+For a desktop-approved takeover, `ocx stop --json` also accepts the complete set of
+`--expect-*` values supplied by `ocx resolve --json`. On Windows, this guarded stop can
+stop a Task Scheduler task only when its registered definition, running state, and wrapper
+ancestor prove it owns the approved proxy. A WinSW service must prove its installed binary
+path and service PID ancestry. After stopping either manager, the CLI signals the approved
+proxy separately and verifies that the task is no longer running, no wrapper survives, and
+WinSW is stopped. A `wscript.exe`, `cscript.exe`, or `cmd.exe` process with an
+unreadable command line in the approved proxy's supervision chain (or surviving under the
+stopped manager) leaves wrapper ownership unknown, so the guarded stop cannot report success.
+Missing or unreadable evidence blocks the guarded stop.
+
 ### `ocx restart`
 
 When a proxy is running, ask that exact attested PID and port to restart in place, wait for its
 normal drain, and verify a different runtime PID on the same port. Managed routing and service
 supervision stay installed throughout; an uncertain request is observed rather than replayed as a
 separate stop/start. If no proxy is running, the command falls back to the normal `ensure` start.
+If an accepted restart loses its replacement, the command attempts a bounded recovery start even
+when Codex autostart is disabled, and reports failure if no proxy starts.
+When the proxy starts its own replacement (no background service supervises it) after the drain
+finished normally, a replacement that exits before it answers is started again up to twice. What
+the replacement prints goes to `~/.opencodex/restart-handoff.log`, which stays near 256 KiB: a
+restart empties it once it reaches that size, and the running replacement checks it once a minute.
+A proxy the OpenCodex desktop app started does not start its own replacement: it exits, and the app
+starts the new proxy on the same port.
 If a live listener cannot be attested to a runtime PID (including a pre-update proxy), restart fails
 closed without an `ensure` or stop/start fallback. After confirming ownership, use `ocx stop` then
 `ocx start` for a standalone proxy. For a service-managed proxy, use `ocx stop` followed by
 `ocx service start` so supervision is restored.
+One invocation re-observes transient discovery races. A failed start is retried only when
+the previous attempt never launched a child or the launched child is known to have exited.
+If a launch may still be running, restart reports the original failure without starting
+a second proxy, even when a health probe finds nothing. When an accepted restart never publishes a replacement, the command re-observes
+once before giving up — a proxy that crashed mid-restart reads absent and is started fresh,
+while a replacement that landed just past the shortened replacement wait still proves success within the overall observation deadline. A live target is
+never stopped to make room, so a stale-but-listening process can not be replaced by a second
+proxy racing it for the port.
+Every failed start attempt is followed by a beat and a strong re-observation before the
+next attempt: a child that was just launched may still be binding, and post-health steps
+may have thrown on an already-serving proxy. A live reading means
+no second start is spawned: a clean refusal then attests success, while a throw
+propagates as a start failure because post-health work failed on a serving process.
+During crash recovery after an accepted live restart, success instead requires a different
+runtime PID on the original port: if the original PID reads live again, the restart fails
+as a missed replacement rather than reporting success.
+Confirmed absence and launch-exit evidence together permit another start attempt. While the previous PID is still live, or a probe is uncertain, the
+confirmation window keeps polling for a replacement inside the reserve instead of
+failing at once. A second proxy is never spawned next to a live one.
+The replacement wait ends early enough that the confirmation window still fits inside the
+overall observation deadline.
 
 Port recovery after stop or update respects a failed OCX process check even when the PID was
 recorded before shutdown. A rejected live holder is left running and prevents TCP-row cleanup.
@@ -154,7 +217,19 @@ is not normalized. JSON exposes the same advice in `versionSkew`, whose fields r
 Print a read-only diagnostic summary: proxy PID, `/healthz` reachability, dashboard URL, config path,
 default provider, Codex autostart setting, service state, shim state, and the redacted effective Codex
 home. Only the explicit, high-confidence Windows Orca runtime-home signature adds an actionable App-home
-mismatch warning; it never changes `CODEX_HOME` automatically.
+mismatch warning; it never changes `CODEX_HOME` automatically. It also warns when the Codex routing
+opencodex wrote names a local port the running proxy does not serve. `ocx sync` repairs it
+immediately, and a running owner proxy may also re-point it on its own once nothing answers on that
+port. A sibling's status does not report it, because its routing names the proxy it runs beside.
+
+When a live proxy has already passed the identity/liveness check, `ocx status` prefers that process's
+attested startup-health report for restart safety and service viability. This avoids false negatives
+from a shell-local service-manager probe that lacks the running service's manager environment. The
+live report is schema-validated; if it is unavailable or malformed, status falls back to the local
+service and shim diagnostics. `ocx doctor` uses the same live-first rule for its **Codex restart safety**
+section, so the two commands should agree on restart protection. If you are diagnosing a discrepancy,
+compare the reported live startup verdict with the local service details rather than treating the shell
+probe as more authoritative.
 
 Human output also includes an **OAuth health** block after the OAuth logins summary: `OAuth health:
 ok` when every known account is healthy, or `OAuth health: warning` with one redacted line per
@@ -239,6 +314,28 @@ The CLI's own `--json` output is deliberately narrower than the HTTP body: it em
 `unreachable`. Exit codes are 0 for ready; 1 for not-ready, pending, failed, timeout, or
 unreachable; and 64 for invalid arguments.
 
+### `ocx resolve [--json]`
+
+Resolve the runtime facts a shell needs without re-implementing them: the config home, the
+effective port, and the identity-checked liveness verdict. `--json` emits one versioned
+document (`schema: "ocx-resolve/1"`) with `cliVersion`, `configHome`, `port`
+(`effective`, `configured`, and `source`), and `liveness` (`status`, `pid`, `port`,
+`source`, plus `version`, `role`, and `hostname` when the live proxy reports them).
+When a proxy is live the document also carries `versionSkew` — the same comparison
+`ocx status` and `ocx doctor` surface — with `cliVersion`, `proxyVersion`, `skewed`,
+a `relation` of `match`, `cli-newer`, `proxy-newer`, `incomparable`, or `unknown`,
+and the operator-facing `warning`. Shells read `relation` rather than reparsing the
+warning; the desktop uses `proxy-newer` to keep a takeover from downgrading the listener.
+Liveness has three answers: `live`, `absent-proven` (every recorded and configured endpoint
+definitively refused or answered non-opencodex), and unknown — a timed-out probe or a listener
+that withholds `/healthz` exits 1 rather than reading as absent, so only `absent-proven` may
+authorise starting a new runtime. The port is the live listener's port when a proxy answers,
+otherwise the configured port (default 10100). Exit 0 carries a trustworthy verdict; exit 1 means
+the CLI could not resolve — including an invalid `config.json`, which is never repaired to
+defaults here — and the caller must refuse to guess; any unknown argument exits 64. Discovery uses
+the same ownership-safe probe budget as `ocx start`, because a false "nothing listening" answer
+is how duplicate proxies happen. The verb is read-only and skips the shim auto-restore preflight.
+
 ### `ocx doctor`
 
 The default report includes the native-write coordinator state and exact path using immutable
@@ -309,6 +406,8 @@ and this session ends with the app.
 Invalidate Codex's local model picker cache so it is rebuilt from the active opencodex catalog. The
 same stale-`app-server` warning and optional restart flags as `ocx sync` apply.
 
+If the derived cache already has identical bytes, the command succeeds without rewriting it or restarting Codex. With `--json`, this is reported as `ok: true`, `wrote: false`, `skipped: true`, and `skippedReason: "unchanged"`; an invalid catalog or failed cache write still exits nonzero.
+
 ### `ocx catalog pull <https-url> [--auth-env <NAME>] [--json] [--restart-codex] [--restart-app-server-only]`
 
 Install a complete catalog served by another OpenCodex instance's `/v1/catalog` endpoint, then
@@ -371,7 +470,22 @@ previous catalog from memory.
 
 ## Background service
 
+A managed service may start a newer installation that previously served the same
+OpenCodex home, even when its service definition still points to an older install.
+If that newer child exits before binding, with any exit code, the original service starts instead
+and applies its own checks before serving.
+Foreground starts and client-launched proxies keep their selected executable.
+On Windows, this applies to Task Scheduler and newly installed or repaired native WinSW
+services. A native WinSW definition created before this behavior needs `ocx service repair`
+to refresh its XML before it can hand off to a newer install.
+
 ### `ocx service [install|repair|restart|start|stop|status|uninstall|remove]`
+
+On Windows Task Scheduler, the service wrapper restarts the proxy after five seconds
+even when an external tool terminates it with exit code 0. If another opencodex proxy
+already owns the port, the wrapper exits deliberately. Use `ocx stop` or
+`ocx service stop` to stop the service and its restart loop. After upgrading an
+existing installation, run `ocx service repair` to refresh the generated wrapper.
 
 Run opencodex as a login-managed background service (macOS **launchd**, Linux **systemd user unit**,
 Windows **Task Scheduler**) that auto-starts on login and auto-restarts on crash. Service runs set
@@ -388,19 +502,29 @@ interrupted package update removed either file, it logs one `installation is inc
 stops instead of retrying the same missing executable every five seconds. Reinstall opencodex, then
 run `ocx service repair` to refresh the task with the restored package paths.
 
-On macOS and Linux, the launchd plist and the systemd unit invoke the first regular, executable
-`ocx` file found on `PATH` at install time rather than the Bun and CLI paths inside the installed
-package tree. Version managers such as
-**mise** and **asdf** install into a versioned directory and delete the old one on upgrade, which
-used to leave the service definition pointing at files that no longer existed — systemd then
-restart-looped while still reporting the service as installed, and launchd kept the old build serving
-until it was restarted by hand. A shim path survives the upgrade, so the definition keeps resolving. Source checkouts without an `ocx` launcher keep the previous direct Bun + CLI form. A
-trusted `OPENCODEX_BUN_PATH` selected before Bun starts is preserved through the shim; package-local
-bundled Bun paths are deliberately rediscovered after upgrades instead of being pinned in the unit.
+Service definitions omit shell-local version-manager multishell directories from their saved
+`PATH`. This includes the native Windows service installed with `ocx service install --native`;
+run `ocx service repair` to regenerate an older WinSW definition with a durable `PATH`.
+
+On Linux, the systemd unit invokes the first regular, executable `ocx` file found on `PATH` at
+install time rather than the Bun and CLI paths inside the installed package tree. Version managers
+such as **mise** and **asdf** install into a versioned directory and delete the old one on upgrade;
+their stable shim keeps the unit resolving. Source checkouts without an `ocx` launcher keep the
+direct Bun + CLI form. A trusted `OPENCODEX_BUN_PATH` selected before Bun starts is preserved
+through the shim; package-local bundled Bun paths are rediscovered after upgrades.
+
+On macOS, launchd instead uses the package-local Bun and CLI paths selected during install or
+repair. This prevents a mutable PATH shim from receiving the service API token and configured proxy
+environment on a later restart. After upgrading a version-manager installation, run
+`ocx service repair` to refresh those paths before restarting the service.
+Launchd restarts the proxy after a crash or failed restart handoff, but leaves it stopped when
+the service deliberately exits cleanly because the desktop app owns the runtime. Run
+`ocx service repair` once to apply this behavior to a service installed by an older version.
 
 Definitions installed before this change still carry the old versioned paths and cannot migrate
 themselves — once the old executable is deleted, no opencodex code runs to fix it. Run
-`ocx service repair` once after upgrading; after that, each service start follows the launcher.
+`ocx service repair` once after upgrading. Linux service starts then follow the launcher; macOS
+repair writes the new package paths into the launchd definition.
 An already-running proxy is not replaced by an external upgrade: when the installed CLI is newer
 than the running proxy, run `ocx service restart` so the new build serves. On macOS, `repair` is not
 enough there: the definition did not change, and a repair that changes nothing reloads nothing.
@@ -422,6 +546,61 @@ If the proxy is newer instead, check the CLI installation and `PATH` as describe
 On Windows, a bare `ocx service` runs the install path only after both Task Scheduler and WinSW are
 proven absent. If either status query is inconclusive, it refuses to register anything and asks you
 to run `ocx service status`; use explicit `ocx service install` only after confirming absence.
+
+### Runtime ownership
+
+The OpenCodex desktop app can take the background proxy over from a CLI installation. When it does,
+it records the handover in the shared service install state, and that record is what makes the
+takeover survive a restart. Your service registration is **kept, never deleted** — the record
+supersedes it rather than replacing it.
+
+A state file with no ownership record means the CLI installation owns the runtime, which is what
+every installation made before this feature is in. Nothing changes for you until an app takes over.
+
+Supervised service children also check the recorded owner before startup and once more while
+holding the startup ownership lease, before choosing a port or publishing a PID. If the desktop
+app claims the runtime during startup, the service child stands down even if the desktop proxy
+has not begun listening yet. An unreadable ownership record has the same stand-down behavior.
+
+Home paths inside a state record are compared with the current home by the physical directory they
+resolve to, not just their spelling. A junction or symlink recorded under an older install still
+names the same home and keeps working after the move; an alias that no longer resolves is only
+treated as a different home when its recorded spelling also differs from the current one, so a
+stale mount still produces the foreign-owner refusal instead of silently claiming the runtime.
+
+While something other than this CLI owns the runtime, the subcommands that would **activate** your
+registration refuse instead:
+
+| Subcommand | Behaviour under a foreign owner |
+| --- | --- |
+| `repair`, `restart` | Refuse before changing anything. The registration is not re-enabled, rewritten or restarted. |
+| `start` | Refuses for the same reason, so an automatic tray start cannot put a second proxy beside the app's. |
+| `stop`, `uninstall` | Unchanged. They deactivate, so they are never gated. |
+| `install` | Takes the runtime back. It clears the ownership record after the registration succeeds, and reports whose it was. |
+
+`ocx update` behaves the same way: it neither stops the running proxy nor refreshes the service
+while the app owns the runtime, because the running server is the app's own bundled binary and the
+refresh would re-enable the launcher the takeover superseded. The app updates its own runtime.
+
+The refusal names the owning installation and the consent generation, for example:
+
+```text
+Background service repair stopped: the desktop app owns the runtime (install <id>, consent generation 2).
+The service registration was left exactly as it is — not re-enabled, not rewritten and not restarted.
+Quit the desktop app and run 'ocx service install' to hand the runtime back to this CLI.
+```
+
+A record that cannot be read or does not parse produces the same refusal with a different first
+line, because an unreadable claim is not the same as no claim — treating it as "nobody owns this"
+is how a permissions error would silently reactivate your service.
+
+**Recovery in every case is `ocx service install`.** It is deliberately the one verb that is never
+gated, so removing the app without handing the runtime back, or a corrupted state file, still leaves
+you a way to take the service back:
+
+```bash
+ocx service install
+```
 
 ```bash
 ocx service
@@ -511,6 +690,9 @@ deleted as an unsafe best-effort rollback.
 
 Wrap a script-based `codex` launcher on PATH with a lightweight autostart script. Real `codex.exe`
 targets are left untouched to avoid breaking exact executable invocations.
+If installation is refused or the resulting shim is unhealthy, the command exits nonzero and
+the dashboard reports the failure reason. A healthy existing shim still counts as success.
+For Windows installations that expose only `codex.exe`, use `ocx service install` for autostart.
 
 Before an install or repair is committed, OpenCodex runs the saved launcher with `--version` while
 service startup is bypassed. It refuses the change and rolls back when the launcher resolves
@@ -611,6 +793,9 @@ file is not part of the injected `env_key` contract; the launching process must 
 Install and control the Windows status tray icon. It starts at Windows login and provides one-click
 proxy controls. `start` and `stop` control the icon only; use its menu to control the proxy.
 `--no-start` applies to `install` and installs the tray without launching it immediately.
+Deprecated: the OpenCodex desktop app provides the tray on Windows, macOS, and Linux; `ocx tray`
+remains for installs without the desktop app.
+When a newer package version is known, the tray adds a blue dot to its online, warning, or offline icon and shows **Update available**. The tray checks its local cached badge about once a minute; stale or unavailable results remove the dot. The menu item opens the dashboard, where you can start the package update. It does not install automatically.
 
 ## Dashboard
 
@@ -629,6 +814,10 @@ package registry or install an update.
 
 ### `ocx update [--tag latest|preview]`
 
+When OpenCodex is installed through mise, this command exits unsuccessfully before stopping the proxy or changing package files and shows `mise upgrade <tool>`, using the verified local mise alias. Update checks remain available and report the installation as externally managed. An unreadable or inconsistent mise ownership record fails closed without guessing a tool name, and `--tag preview` never changes mise's configured selection.
+
+On Linux, a background service whose recorded launcher is mise's package launcher (`<tool>/latest/node_modules/.bin/ocx`, not a mise shim) follows `mise upgrade` by itself: within about ten seconds of the new version settling, it drains active requests and restarts onto it, and it recovers the same way if mise later prunes the version it was running. On macOS, for a service installed through a mise shim, and for a foreground proxy, restart it yourself after upgrading (on macOS, `ocx service repair` first).
+
 Self-update opencodex from npm. Stable installs use `@latest`; preview installs stay on `@preview`
 unless you pass `--tag latest|preview`. It detects a source checkout and tells you to
 `git pull && bun install` instead, and is a no-op if you are already on the newest version for that
@@ -638,6 +827,9 @@ Unix-only check. A failure aborts while the tray and proxy are still running. A 
 then stopped before files are replaced; an installed service is rebuilt and started automatically,
 while a foreground installation prints `ocx start` as the next step. Dashboard update records
 redact profile/cache paths and UID/GID values before they are persisted.
+If the install step fails, the previous version stays installed and its service is restarted; the
+terminal output names the next step, and [Update Failed on Windows](/troubleshooting/update-failed/)
+covers finishing the update and the folders a failed attempt can leave behind.
 
 ```bash
 ocx update

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   classifyModelFamilyForQuota,
+  exhaustedCooldownMs,
   hasHeadroomEvidence,
   isAccountQuotaExhausted,
   rankAccountsByHeadroom,
@@ -73,6 +74,20 @@ function config(strategy?: "quota" | "round-robin" | "fill-first"): OcxConfig {
     ...(strategy ? { pool: { kernel: true } } : {}),
   } as unknown as OcxConfig;
 }
+
+test("Antigravity cooldown uses the requested family's latest exhausted reset", () => {
+  const now = Date.now();
+  setCachedProviderAccountQuotaForTests("google-antigravity", "exhausted-cla", {
+    updatedAt: now, customWindows: [
+      { label: "Gem", percent: 10, resetAt: now + 60_000 },
+      { label: "Cla", percent: 100, resetAt: now + 3_600_000 },
+      { label: "Cla (Weekly)", percent: 100, resetAt: now + 7_200_000 },
+    ],
+  });
+  expect(exhaustedCooldownMs("google-antigravity", "exhausted-cla", now, undefined, "claude-sonnet-4-6")).toBe(7_200_000);
+  expect(exhaustedCooldownMs("google-antigravity", "exhausted-cla", now, undefined, "gemini-3.8-flash")).toBeNull();
+  expect(exhaustedCooldownMs("google-antigravity", "exhausted-cla", now + 7_200_001, undefined, "claude-sonnet-4-6")).toBeNull();
+});
 
 function seedWindows(accountId: string, gem: number, cla: number): void {
   setCachedProviderAccountQuotaForTests("google-antigravity", accountId, {

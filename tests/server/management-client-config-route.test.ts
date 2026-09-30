@@ -178,6 +178,8 @@ describe("native Anthropic image input reaches client documents", () => {
           baseUrl: "https://api.anthropic.com",
           authMode: provider === "anthropic" ? "oauth" : "key",
           liveModels: false,
+          // Anthropic Fast is opt-in; enable it so the export roster includes the --fast selectors.
+          fastEnabled: true,
         },
       },
     } as unknown as OcxConfig;
@@ -186,21 +188,31 @@ describe("native Anthropic image input reaches client documents", () => {
       .filter(model => model.provider === provider);
     expect(models.length).toBeGreaterThan(0);
     const context = { baseUrl: "http://127.0.0.1:10100/v1", config, models };
-    const expectedInputs = models.map(model => ({ id: model.namespaced, input: ["text", "image"] }));
+    // Client exports must include exactly the documented Anthropic Fast selectors. Keep this
+    // roster explicit so new base catalog models cannot silently change the assertion.
+    const expectedInputs = models
+      .map(model => ({ id: model.namespaced, input: ["text", "image"] }))
+      .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const expectedFastInputs = ["claude-opus-4-8", "claude-opus-5", "claude-opus-5-5"]
+      .map(model => ({ id: `${provider}/${model}--fast`, input: ["text", "image"] }))
+      .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const expectImageInputs = (rows: Array<{ id: string; input: string[] }>) => {
+      const baseRows = rows.filter(row => !row.id.endsWith("--fast"));
+      const fastRows = rows.filter(row => row.id.endsWith("--fast"));
+      expect(baseRows).toEqual(expectedInputs);
+      expect(fastRows).toEqual(expectedFastInputs);
+    };
 
     for (const client of ["aside", "pi", "gajae", "prime", "omo", "omp"] as const) {
       const document = buildClientConfig(client, context) as PiGeneratedConfig;
       const rows = document.providers[OPENCODE_PROVIDER_ID]!.models;
-      expect({ client, inputs: rows.map(({ id, input }) => ({ id, input })) })
-        .toEqual({ client, inputs: expectedInputs });
+      expectImageInputs(rows.map(({ id, input }) => ({ id, input })));
     }
     const dsh = buildClientConfig("dsh", context) as DshGeneratedConfig;
-    expect(dsh["llm-pi-ai"].providers[OPENCODE_PROVIDER_ID]!.models.map(({ id, input }) => ({ id, input })))
-      .toEqual(expectedInputs);
+    expectImageInputs(dsh["llm-pi-ai"].providers[OPENCODE_PROVIDER_ID]!.models.map(({ id, input }) => ({ id, input })));
 
     const openclaw = buildClientConfig("openclaw", context) as OpenclawGeneratedConfig;
-    expect(openclaw.models.providers[OPENCODE_PROVIDER_ID]!.models.map(({ id, input }) => ({ id, input })))
-      .toEqual(expectedInputs);
+    expectImageInputs(openclaw.models.providers[OPENCODE_PROVIDER_ID]!.models.map(({ id, input }) => ({ id, input })));
     const kimi = buildClientConfig("kimi", context) as KimiGeneratedConfig;
     const opencode = buildClientConfig("opencode", context) as OpencodeGeneratedConfig;
     const zcode = buildClientConfig("zcode", context) as ZcodeGeneratedConfig;
@@ -277,9 +289,9 @@ describe("native Anthropic effort ladder reaches the Aside document", () => {
   });
 });
 describe("GET /api/client-config", () => {
-  for (const hostname of ["0.0.0.0", "::", "192.0.2.40"]) {
-    test(`Raycast export refuses authenticated bind ${hostname} before generating a document`, async () => {
-      const response = await clientConfigApi(baseConfig({ hostname }), "?client=raycast");
+  for (const client of ["raycast", "droid"]) for (const hostname of ["0.0.0.0", "::", "192.0.2.40"]) {
+    test(`${client} export refuses authenticated bind ${hostname} before generating a document`, async () => {
+      const response = await clientConfigApi(baseConfig({ hostname }), `?client=${client}`);
       expect(response.status).toBe(400);
       const body = await response.json() as Record<string, unknown>;
       expect(body.reason).toBe("non_loopback");
@@ -287,6 +299,18 @@ describe("GET /api/client-config", () => {
       expect(body.text).toBeUndefined();
     });
   }
+
+  test("Droid export uses the declared unauthenticated listener", async () => {
+    const response = await clientConfigApi(baseConfig({
+      hostname: "0.0.0.0", unauthenticatedLoopbackListener: { enabled: true, port: 10237 },
+    }), "?client=droid");
+    expect(response.status).toBe(200);
+    const body = await response.json() as ClientConfigEnvelope;
+    const rows = (body.config as { customModels: Array<{ baseUrl: string }> }).customModels;
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every(row => row.baseUrl === "http://127.0.0.1:10237/v1")).toBe(true);
+    expect(body.text).not.toContain(REAL_LOOKING_KEY);
+  });
 
   test("Raycast export uses the declared unauthenticated listener instead of the management port", async () => {
     const response = await clientConfigApi(baseConfig({

@@ -11,7 +11,7 @@ Responses body-reader limits and lifetime handling follow the
 
 How opencodex measures request and stream bytes without allocating copies solely to count
 them. These contracts are shared by request parsing, SSE rewriting, the provider adapters and
-the translator budget, which is why so many documents link here rather than restating them. Response-attached WebSocket telemetry follows the [stage record identity contract](responses.md#passthrough-sse-stream-shapes-314). Cursor's localized native-shell names follow the [routing-commentary guard contract](../providers/cursor.md#cursor-native-exec).
+the translator budget, which is why so many documents link here rather than restating them. Response-attached WebSocket telemetry follows the [stage record identity contract](responses-wire-shapes.md#passthrough-sse-stream-shapes-314). Cursor's localized native-shell names follow the [routing-commentary guard contract](../providers/cursor.md#cursor-native-exec).
 
 ## Request-copy accounting
 
@@ -56,6 +56,10 @@ lifecycle, cancellation races, protocol envelopes, and the real HTTP admission b
 
 ## Stream-buffer accounting
 
+`src/web-search/run-turn-loop.ts` charges retained iteration events and generated replay history to
+the request translator budget. Each owner releases its own reservations on completion, error,
+cancellation or consumer closure; a buffer-limit failure terminates without another search.
+
 `src/server/sse-payload-rewrite.ts` shares an incremental block buffer with native Chat. It scans
 only new input, counts consumed blocks rather than remaining suffixes, and preserves LF/CRLF,
 partial-event, injection/drop, and EOF behavior. Output admission precedes its single UTF-8 encoding;
@@ -81,6 +85,13 @@ across deltas, while retaining snapshot/done/delta precedence and existing termi
 Serialized request and buffered-response observations use byte counts without measurement arrays.
 The same rule applies to Anthropic, Google, and Chat response accounting; serialization itself is
 preserved where the existing metric is the serialized JSON size.
+
+The buffered Chat collector in `src/chat/outbound.ts` computes a split surrogate pair's incremental
+UTF-8 cost from the runtime's measured separate and joined sizes. It does not assume how a Bun
+version prices a lone surrogate, so retained content, reasoning, and refusal fields enforce and
+release the same exact budget on every supported runtime.
+
+> Decision record: [ADR-0112](../decisions/ADR-0112-chat-collector-unicode-accounting.md)
 
 `src/lib/translator-budget.ts` admits an event batch atomically from per-event serialized byte sizes
 plus exact separators, without joining a second full JSON array. `src/lib/admission.ts` counts and
@@ -125,7 +136,7 @@ binds the bounded non-stream wrapper to request-log status and metadata behavior
 Retaining whole response bodies is the separate concern of `src/lib/bounded-body.ts`, whose cap,
 deadline, and cancellation rules are specified in the [bounded ingestion contract](inventory.md#bounded-response-ingestion-and-orcarouter-login).
 
-Upstream API-key usage follows the [physical-attempt account attribution contract](../gui-and-management-api.md#upstream-key-account-attribution), independently of subscription quota observations.
+Upstream API-key usage follows the [physical-attempt account attribution contract](../dashboard-and-usage.md#upstream-key-account-attribution), independently of subscription quota observations.
 
 ## Terminal-continuation retention
 
@@ -170,4 +181,4 @@ Schema size still determines traversal work and the cost of copying a changed br
 
 Dashboard Fast-row persistence and client refresh follow the [Fast selector rows setting contract](../gui-and-management-api.md#fast-selector-rows-setting).
 
-The [compaction routing override](responses.md#compaction-routing-overrides) changes model and effort scalars on the already-read request body, before parsing, within the existing body-reader budget.
+The [compaction routing override](responses-failover.md#compaction-routing-overrides) changes model and effort scalars on the already-read request body, before parsing, within the existing body-reader budget.

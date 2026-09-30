@@ -1,7 +1,9 @@
 import { normalizeRoutedAgentMessages } from "../routed-agent-messages";
+import { nameRoutedIdentity, repairIdentityInResponsesBody, stripRoutedIdentity } from "../identity";
 import { stripBracketedModelSuffix } from "../openai-chat";
 import { normalizeOpenCodeGoAdditionalTools } from "../opencode-go-additional-tools";
 import { isXaiResponsesDestination } from "../../providers/xai-transport";
+import { applyGithubCopilotContextTier } from "../../providers/github-copilot-context";
 import { Buffer } from "node:buffer";
 import type { IncomingMeta, ProviderAdapter } from "../base";
 import { namespacedToolName, type AdapterEvent, type OcxParsedRequest, type OcxProviderConfig, type OcxUsage, type TierDecision } from "../../types";
@@ -15,7 +17,7 @@ import {
   isOpenAiOperatedResponsesDestination,
 } from "../../providers/openai-tiers";
 import type { TranslatorBudget } from "../../lib/translator-budget";
-import { rewriteRoutedCustomToolsForUpstream } from "../../responses/custom-tool-compat";
+import { rewriteRoutedCustomToolsForUpstream, validateFinalCustomToolCompatibility } from "../../responses/custom-tool-compat";
 import { rewriteRoutedToolSearchForUpstream } from "../../responses/tool-search-compat";
 import { rewriteRoutedNamespaceToolsForUpstream } from "../../responses/namespace-tool-compat";
 import { repairLegacyDottedToolCallNames } from "../../responses/legacy-dotted-tool-name-repair";
@@ -31,9 +33,10 @@ import {
 } from "../xai-tool-schema";
 import {
   createAdapterTierMetadata,
+  emittedFastWire,
 } from "../../providers/fastwire";
-import { dropResponsesReasoningInputItems, mapRoutedResponsesReasoningEffort, normalizeConfiguredReasoningSummaryDelivery, sanitizeReasoningInputContent, stripDisabledReasoningSummaries, stripDisabledVerbosity, stripUnsupportedReasoningSummaryDelivery } from "./reasoning";
-import { scrubOcxCompactionItems, stripCanonicalOnlyToolFields, stripCanonicalOnlyTopLevelFields, stripInternalChatMessageMetadataPassthrough, stripInvalidItemIds, stripItemIdsWhenUnstored } from "./request-strips";
+import { dropResponsesReasoningInputItems, mapRoutedResponsesReasoningEffort, normalizeConfiguredReasoningSummaryDelivery, sanitizeReasoningInputContent, stripDisabledReasoningSummaries, stripDisabledVerbosity, stripNoneReasoningSummary, stripUnsupportedReasoningSummaryDelivery } from "./reasoning";
+import { scrubOcxCompactionItems, stripCanonicalOnlyToolFields, stripCanonicalOnlyTopLevelFields, stripInternalChatMessageMetadataPassthrough, stripInvalidItemIds, stripItemIdsWhenUnstored, stripRejectedSamplingParams } from "./request-strips";
 import { stripCanonicalForwardPromptCacheOptions, stripDeprecatedPromptCacheRetention } from "./prompt-cache";
 import { isPlainObject } from "./internal";
 import { normalizeToolSchemas, promoteClientLoadedTools, stripUnsupportedHostedTools } from "./tool-schema";
@@ -42,6 +45,8 @@ import { bridgeSearchReplayScope } from "../../responses/bridge-search-replay-ca
 import { applyTierDecisionToResponsesBody, normalizeCanonicalForwardContinuationEnvelope, normalizeCanonicalForwardPromptEnvelope, stripCanonicalForwardSamplingParams, stripPreviousResponseId, stripStatefulResponsesParams, stripUnsupportedForwardParams } from "./canonical-forward";
 import { normalizeImageGenClientTools, preferConfiguredHostedTools } from "./image-gen";
 import { stripMuseSparkUnsupportedWebSearchFields, stripOpenAiOnlyWebSearchFields } from "./web-search";
+import { observeOutbound } from "../../usage/cache-diagnostic";
+import { normalizeMuseToolChoice } from "./muse-tool-choice";
 
 /**
  * Identifies DeepSeek's strict Responses replay contract: tool-bearing continuations need
@@ -267,6 +272,17 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       if (!forward) outBody = normalizeRoutedAgentMessages(outBody, {
         allowStringContent: isXaiResponsesDestination(provider),
       });
+      // #5217: a sub-agent inherits the parent session's instruction block, so the identity
+      // sentence this proxy generated for the PARENT's model rides along to a worker running a
+      // different one. On a routed destination it is renamed to that destination — including the
+      // model-neutral catalog sentence, which this adapter never names itself; on a native/forward
+      // destination our sentence is dropped, because Codex's own identity wording (sent in the
+      // client's model_switch block) is the correct one there. Text the proxy did not generate —
+      // user turns, tool output, fenced code, provider-native blocks — is untouched.
+      outBody = repairIdentityInResponsesBody(
+        outBody,
+        forward ? stripRoutedIdentity : (text: string) => nameRoutedIdentity(text, parsed.modelId),
+      );
       outBody = mapRoutedResponsesReasoningEffort(outBody, provider, parsed.modelId);
       // stripPreviousResponseId() intentionally returns its input on a no-op. Detach before the
       // tier write so a force-fast/default decision can never mutate parsed._rawBody.
@@ -294,7 +310,15 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       }
       const synthesizeMissingCallOutputs = !forward && (stateless || pairedToolResults);
       if (forward || stateless || pairedToolResults) {
-        outBody = repairOrphanedInputItems(outBody, unexpandedMiss, synthesizeMissingCallOutputs);
+        // A stateful destination can resolve an output-only delta against the call stored behind
+        // an unexpanded previous_response_id. All other shapes have no hidden call to preserve.
+        const repairOrphanOutputs = forward || stateless || !unexpandedMiss;
+        outBody = repairOrphanedInputItems(
+          outBody,
+          unexpandedMiss,
+          synthesizeMissingCallOutputs,
+          repairOrphanOutputs,
+        );
       }
       if (provider.dropResponsesReasoningItems === true) {
         outBody = dropResponsesReasoningInputItems(outBody);
@@ -303,9 +327,11 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         outBody = normalizeResponsesToolResultAdjacency(outBody);
       }
       if (forward) {
-        outBody = stripUnsupportedForwardParams(outBody);
-        // Only the canonical ChatGPT backend rejects the retired field; a self-hosted or
-        // third-party forward gateway may still accept it, so this must not be widened.
+        // `metadata` is stripped on every forward route for compatibility with the canonical backend.
+        // `max_output_tokens` is stripped only when this provider is the canonical backend.
+        outBody = stripUnsupportedForwardParams(outBody, isCanonicalOpenAiForwardProvider(provider));
+        // Only the canonical ChatGPT backend rejects the canonical-only fields below; a self-hosted
+        // or third-party forward gateway may accept them, so this guard must not be widened.
         if (isCanonicalOpenAiForwardProvider(provider)) {
           outBody = stripCanonicalForwardSamplingParams(outBody);
           outBody = stripDeprecatedPromptCacheRetention(outBody, parsed.modelId);
@@ -314,6 +340,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
           outBody = normalizeCanonicalForwardContinuationEnvelope(outBody);
         }
       } else {
+        outBody = stripRejectedSamplingParams(outBody, provider, parsed.modelId);
         outBody = preferConfiguredHostedTools(
           outBody,
           provider,
@@ -326,13 +353,14 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         outBody = repairOversizedReplayCallIds(outBody);
       }
       outBody = stripUnsupportedReasoningSummaryDelivery(outBody, parsed.modelId);
+      outBody = stripNoneReasoningSummary(outBody);
       // #4587: on a bridged provider, hand the destination back the search call and result the
       // proxy executed on its behalf, in place of the hosted cell the caller replays. Scoped to
-      // this destination and recorded by the bridge itself, so a provider without the opt-in
-      // computes no identity and keeps the body reference it already had. This runs before the
-      // query backfill below because a restored cell is no longer a web_search_call to repair.
+      // its exact conversation and serving identity and recorded by the bridge itself, so a
+      // provider without the opt-in computes no identity and keeps the body reference it already
+      // had. This runs before query backfill because a restored cell is no longer one to repair.
       if (provider.webSearchBridge?.enabled === true) {
-        outBody = restoreBridgedWebSearchCalls(outBody, bridgeSearchReplayScope(provider.baseUrl));
+        outBody = restoreBridgedWebSearchCalls(outBody, bridgeSearchReplayScope(parsed._reasoningReplayScope));
       }
       // Repair stored history from before the bridge emitted both keys, in either
       // direction: a conversation that already recorded a web_search_call replays it
@@ -387,8 +415,9 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         outBody = rewritten.body;
         convertedRoutedNamespaceToolAliases = rewritten.aliases;
         // Preserve xAI's cached-only fail-closed semantics and image-search mapping before the
-        // generic capability fallback removes the private OpenAI fields.
-        outBody = normalizeXaiResponsesWebSearch(outBody, provider);
+        // generic capability fallback removes the private OpenAI fields. Grok relayed through
+        // OpenCode Go speaks the same dialect, which the final model id and URL identify.
+        outBody = normalizeXaiResponsesWebSearch(outBody, provider, { modelId: parsed.modelId, responseUrl: url });
         outBody = injectXaiResponsesXSearch(outBody, provider, parsed._replayPrefixLen);
         // xAI and explicitly classified compatible gateways reject these OpenAI web_search
         // extensions. Keep them for OpenAI API-key traffic and unclassified gateways.
@@ -449,11 +478,14 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
                   preserveRawReasoningContent: provider.preserveResponsesReasoningContent === true,
                   dropNullContentChannel: !isOpenAiOperatedResponsesDestination(provider),
                   stripEncryptedContent: threadServingIdentityChanged || requiresPlaintextReasoningReplay(provider),
+                  dropForeignItemId: parsed._dropForeignReasoningItemIds === true,
+                  requirePlaintextReasoning: requiresPlaintextReasoningReplay(provider),
                 },
               ),
               provider,
             ),
           ),
+          isXaiResponsesDestination(provider),
         ),
         isXaiSchemaTarget(provider),
       );
@@ -467,7 +499,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         parsed.modelId,
       );
       // Normalize the wire model before deriving model-dependent transport metadata.
-      const finalBody =
+      let finalBody =
         provider.modelSuffixBracketStrip
           && unnormalizedBody !== null
           && typeof unnormalizedBody === "object"
@@ -475,6 +507,20 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
           && typeof (unnormalizedBody as { model?: unknown }).model === "string"
           ? { ...(unnormalizedBody as Record<string, unknown>), model: stripBracketedModelSuffix((unnormalizedBody as { model: string }).model) }
           : unnormalizedBody;
+      if (isMetaAiResponsesDestination(url)) {
+        const originalChoice = isPlainObject(parsed._rawBody) ? parsed._rawBody.tool_choice : undefined;
+        finalBody = normalizeMuseToolChoice(finalBody, originalChoice);
+      }
+      // The canonical ChatGPT Codex endpoint is SSE-only even though the public Responses surface
+      // permits an omitted/false `stream`. Keep the client's delivery preference on `parsed.stream`
+      // and coerce only this final upstream copy; passthrough delivery folds the terminal stream
+      // back into JSON for that client. `store` is intentionally untouched here because explicit
+      // caller storage semantics are independent of the transport required by the destination.
+      if (isCanonicalOpenAiForwardProvider(provider)
+        && isPlainObject(finalBody)
+        && finalBody.stream !== true) {
+        finalBody = { ...finalBody, stream: true };
+      }
       if (isCanonicalOpenAiForwardProvider(provider)) {
         const routingHeaders = new Headers(headers);
         applyCodexRoutingHint(routingHeaders, finalBody);
@@ -486,14 +532,10 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         const hint = routingHeaders.get(CODEX_ROUTING_HINT_HEADER);
         if (hint !== null) headers[CODEX_ROUTING_HINT_HEADER] = hint;
       }
-      const actualServiceTier = isPlainObject(finalBody) && typeof finalBody.service_tier === "string"
-        ? finalBody.service_tier
-        : null;
       const tierLog = createAdapterTierMetadata(
         parsed.options?.tierObservation,
         parsed.options?.tierDecision,
-        actualServiceTier === null ? null : "service-tier",
-        actualServiceTier,
+        ...emittedFastWire(parsed, finalBody),
       );
       // The Responses adapter is passthrough: it forwards `parsed._rawBody` rather than
       // rebuilding the body from `parsed.modelId`, and the router writes the routed id into
@@ -501,7 +543,11 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       // here, on the serialized body, not on the parsed selector. One place covers both the
       // HTTP and the WebSocket outbound, because the WS path transports this same request
       // instead of rebuilding it.
-      const body = JSON.stringify(finalBody);
+      observeOutbound(parsed._rawBody, finalBody, headers);
+      if (!isCanonicalOpenAiForwardProvider(provider)) {
+        validateFinalCustomToolCompatibility(finalBody, provider.supportsResponsesCustomTools);
+      }
+      const body = JSON.stringify(applyGithubCopilotContextTier(finalBody, provider, parsed.modelId, incoming.providerName));
       const releaseBodyObservation = translatorBudget.observeExternallyCapped(
         "passthrough_serialization",
         Buffer.byteLength(body, "utf8"),

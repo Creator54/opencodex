@@ -15,6 +15,7 @@ interface TargetCooldown {
 
 const DEFAULT_COOLDOWN_MS = 60_000;
 const MAX_COOLDOWN_MS = 10 * 60_000;
+const MAX_SERVER_DELAY_MS = 24 * 60 * 60_000;
 /** Short cooldown for request-rate 429s (for example provider code 1302) that omit Retry-After. */
 export const COMBO_REQUEST_RATE_COOLDOWN_MS = 5_000;
 
@@ -115,6 +116,7 @@ function parseHttpDate(value: string, now: number): number | undefined {
   );
 }
 
+/** Parse a Retry-After delay, optionally retaining an upstream delay up to one day. */
 export function parseRetryAfterMs(
   value: string | null | undefined,
   now = Date.now(),
@@ -122,11 +124,10 @@ export function parseRetryAfterMs(
 ): number | undefined {
   const text = value?.trim();
   if (!text) return undefined;
-  // A local wait ceiling must not make an explicit upstream reset expire early.
-  // Keep legacy bounded parsing for other callers. The opt-in stores a timestamp;
-  // the combo picker still independently limits how long a live request waits.
+  // Keep legacy bounded parsing for other callers. Combo cooldowns preserve
+  // multi-hour upstream delays, but never quarantine a target beyond one day.
   const maximum = options?.preserveServerDelay === true
-    ? Number.MAX_SAFE_INTEGER - Math.max(0, now)
+    ? MAX_SERVER_DELAY_MS
     : MAX_COOLDOWN_MS;
   if (/^\d+(?:\.\d+)?$/.test(text)) {
     const seconds = Number(text);
@@ -200,6 +201,7 @@ export function comboCooldownRetryAfterSeconds(comboId: string, now = Date.now()
   return String(Math.max(1, Math.ceil(remainingMs / 1000)));
 }
 
+/** Record a combo target cooldown, preferring bounded upstream retry evidence. */
 export function coolComboTarget(
   comboId: string,
   target: Pick<OcxComboTarget, "provider" | "model">,
@@ -213,11 +215,11 @@ export function coolComboTarget(
     code?: string | null;
     message?: string;
   },
-): void {
+): boolean {
   const now = options?.now ?? Date.now();
   const writerGeneration = options?.writerGeneration ?? captureConfigGeneration();
   const ownerKey = `${comboId}::${targetKey(target)}`;
-  if (writerGeneration < lastReconciledGeneration && !liveComboTargets.has(ownerKey)) return;
+  if (writerGeneration < lastReconciledGeneration && !liveComboTargets.has(ownerKey)) return false;
   // A server-provided Retry-After is authoritative, including an immediate `0` directive.
   // A quota reset is the next-most-specific signal (#3256); configured and default cooldowns
   // are only fallbacks when upstream supplied neither usable value.
@@ -228,17 +230,23 @@ export function coolComboTarget(
   const cooldownMs = serverDelayMs
     ?? parseResetCooldownMs(options?.resetAt, now)
     ?? options?.cooldownMs
-    ?? (isTransientRequestRateLimit({
-      status: options?.status,
-      code: options?.code,
-      message: options?.message,
-    }) ? COMBO_REQUEST_RATE_COOLDOWN_MS : DEFAULT_COOLDOWN_MS);
+    // A spent account window or an unpaid/rejected credential does not turn over in a minute,
+    // so the 60s default would re-offer a target that cannot succeed. Only the duration
+    // changes; the scope and hop decisions are untouched.
+    ?? (isAccountWindowExhausted(options?.message ?? "", options?.code)
+      || PROVIDER_SCOPED_FAILURE_CODES.has(normalizedFailureCode(options?.code))
+      ? MAX_COOLDOWN_MS
+      : isTransientRequestRateLimit({
+        status: options?.status,
+        code: options?.code,
+        message: options?.message,
+      }) ? COMBO_REQUEST_RATE_COOLDOWN_MS : DEFAULT_COOLDOWN_MS);
   targetCooldowns.set(cooldownMapKey(comboId, target), {
-    // Only the locally chosen fallback is capped at ten minutes. An explicit
-    // server lower bound (including one hour) remains authoritative.
+    // Local fallbacks are capped at ten minutes; explicit server delays at one day.
     cooldownUntil: now + (serverDelayMs ?? Math.min(Math.max(cooldownMs, 1), MAX_COOLDOWN_MS)),
   });
   sweepExpiredOnWrite(now);
+  return true;
 }
 
 export function earliestComboCooldown(
@@ -302,6 +310,30 @@ export type ComboFailureCooldownScope = "none" | "target" | "provider";
 
 function normalizedFailureCode(code?: string | null): string {
   return code?.trim().toLowerCase().replaceAll("-", "_") ?? "";
+}
+
+/**
+ * A spent account window, by structured code or upstream prose. Status is deliberately not
+ * consulted: the ChatGPT Codex backend reports a depleted plan window as HTTP 502
+ * `upstream_server_error` carrying `The usage limit has been reached`, never the documented 429,
+ * so any status gate misses it. Read in exactly ONE place -- the cooldown DURATION fallback. A
+ * status-blind prose match is safe for choosing how long to wait; it is not safe for choosing
+ * what to black out, so `isProviderScopedQuotaCap` and the scope/decision paths stay untouched
+ * and a Codex 502 still resolves `target` scope and `hop` through `status >= 500`.
+ */
+// `1308` is the vendor code for a spent five-hour window and carries no prose of its own when the
+// upstream reports it bare, so it belongs here too. The rest of QUOTA_LIMIT_CODES stays out: those
+// are quota-limit codes whose window length this gateway has no evidence for, and guessing long on
+// them would hold a target that may clear sooner.
+const ACCOUNT_EXHAUSTION_CODES = new Set(["usage_limit_exceeded", "usage_limit_reached", "1308"]);
+// Token-plan windows (Alibaba's DeepSeek/Qwen plans) report "Your token-plan 1-week quota has been
+// exhausted" (#5494). The match is anchored to that phrasing: a looser "quota ... exhausted" would
+// also catch per-minute limits, and this arm outranks the transient rate-limit duration.
+const ACCOUNT_EXHAUSTION_TEXT = /usage limit (?:has been )?reached|token-plan\s+\S+\s+quota has been exhausted/;
+
+function isAccountWindowExhausted(message: string, code?: string | null): boolean {
+  return ACCOUNT_EXHAUSTION_CODES.has(normalizedFailureCode(code))
+    || ACCOUNT_EXHAUSTION_TEXT.test(message.toLowerCase());
 }
 
 function isProviderScopedQuotaCap(

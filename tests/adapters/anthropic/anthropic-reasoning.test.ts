@@ -26,17 +26,19 @@ async function bodyOf(p: OcxParsedRequest, configuredProvider = provider): Promi
 }
 
 describe("anthropic extended-thinking gate", () => {
-  test("reasoning 'none' does NOT enable thinking and preserves temperature/top_p", async () => {
+  // Sonnet 4.5 takes temperature or top_p alone but 400s on both (live 2026-09-29), so a request
+  // carrying both keeps temperature; each field alone survives.
+  test("reasoning 'none' does NOT enable thinking and preserves temperature", async () => {
     const b = await bodyOf(parsed("none", { temperature: 0.3, topP: 0.9 }));
     expect(b.thinking).toBeUndefined();
     expect(b.temperature).toBe(0.3);
-    expect(b.top_p).toBe(0.9);
+    expect(b.top_p).toBeUndefined();
   });
 
   test("reasoning absent does NOT enable thinking and preserves sampling", async () => {
-    const b = await bodyOf(parsed(undefined, { temperature: 0.5, topP: 0.8 }));
+    expect((await bodyOf(parsed(undefined, { temperature: 0.5 }))).temperature).toBe(0.5);
+    const b = await bodyOf(parsed(undefined, { topP: 0.8 }));
     expect(b.thinking).toBeUndefined();
-    expect(b.temperature).toBe(0.5);
     expect(b.top_p).toBe(0.8);
   });
 
@@ -98,13 +100,17 @@ describe("anthropic extended-thinking gate", () => {
     "claude-opus-4-8.1",
   ])("adaptive-thinking model %s sends thinking.adaptive + output_config.effort", async (modelId) => {
     const b = await bodyOf(parsed("xhigh", { temperature: 0.3, topP: 0.9 }, modelId));
-    expect(b.thinking).toEqual({ type: "adaptive" });
+    expect(b.thinking).toEqual({ type: "adaptive", display: "summarized" });
     expect(b.output_config).toEqual({ effort: "xhigh" });
     expect(b.temperature).toBeUndefined();
     expect(b.top_p).toBeUndefined();
   });
 
   test("adaptive-thinking model maps unsupported 'minimal' effort to 'low'", async () => {
+    // #5824: summarized thinking keeps a long think visible as reasoning deltas; a caller that
+    // hides the summary keeps the provider default instead.
+    const hidden = await bodyOf(parsed("high", { hideThinkingSummary: true }, "claude-opus-4-8"));
+    expect(hidden.thinking).toEqual({ type: "adaptive" });
     const b = await bodyOf(parsed("minimal", {}, "claude-fable-5"));
     expect(b.output_config).toEqual({ effort: "low" });
     expect(b.max_tokens).toBe(12_288);
@@ -259,7 +265,7 @@ describe("anthropic extended-thinking gate", () => {
     // Exact regression: effort=max budget is 32000; adaptive ceiling adds OUTPUT_HEADROOM (8192)
     // so max_tokens = 40192, genuinely above the reasoning budget at full effort.
     expect(b.max_tokens as number).toBe(40_192);
-    expect(b.thinking).toEqual({ type: "adaptive" });
+    expect(b.thinking).toEqual({ type: "adaptive", display: "summarized" });
     expect(b.output_config).toEqual({ effort: "max" });
   });
 
@@ -354,7 +360,7 @@ describe("anthropic extended-thinking gate", () => {
     "claude-opus-4-8/vendor-suffix",
   ])("adaptive-thinking model %s keeps the adaptive wire shape", async (modelId) => {
     const b = await bodyOf(parsed("high", {}, modelId));
-    expect(b.thinking).toEqual({ type: "adaptive" });
+    expect(b.thinking).toEqual({ type: "adaptive", display: "summarized" });
     expect(b.output_config).toEqual({ effort: "high" });
   });
 
@@ -362,7 +368,8 @@ describe("anthropic extended-thinking gate", () => {
     const b = await bodyOf(parsed("none", { temperature: 0.3 }, "claude-fable-5"));
     expect(b.thinking).toBeUndefined();
     expect(b.output_config).toBeUndefined();
-    expect(b.temperature).toBe(0.3);
+    // Fable rejects any non-default temperature (live 2026-09-29), so the adapter drops it.
+    expect(b.temperature).toBeUndefined();
   });
 
   // #545: Claude Desktop's Auto Mode classifier sends thinking:{type:"disabled"} with
@@ -449,6 +456,21 @@ describe("anthropic extended-thinking gate", () => {
 });
 
 describe("Anthropic Messages stored-OAuth round trip", () => {
+  test("Messages adaptive display omission survives the stored OAuth round trip", async () => {
+    const inbound = anthropicToResponsesBody({
+      model: "claude-opus-4-8",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "Keep thinking hidden" }],
+      thinking: { type: "adaptive", display: "omitted" },
+      output_config: { effort: "high" },
+    });
+
+    const body = await bodyOf(parseRequest(inbound), { ...provider, authMode: "oauth" });
+
+    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.output_config).toEqual({ effort: "high" });
+  });
+
   test("Messages structured output survives the stored OAuth round trip", async () => {
     const schema = {
       type: "object",

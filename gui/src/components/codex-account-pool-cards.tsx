@@ -1,13 +1,15 @@
 import { useState } from "react";
-import { useT } from "../i18n/shared";
+import { useT, useI18n } from "../i18n/shared";
 import { useCopyFeedback } from "./use-copy-feedback";
 import { IconAlert, IconPause, IconPlay, IconX } from "../icons";
 import { displayAccountId } from "../lib/privacy";
 import AccountPriorityControl, { AccountPriorityBadge } from "./AccountPriorityControl";
 import { DEFAULT_ACCOUNT_PRIORITY, normalizeAccountPriority } from "../account-priority";
+import AccountAutoSwitchControl from "./AccountAutoSwitchControl";
 import type { CodexAccountEntry } from "./codex-account-pool-types";
 import type { CodexAccountModeState } from "../codex-multi-state";
 import QuotaBars from "./QuotaBars";
+import CodexCreditsRow from "./CodexCreditsRow";
 import { CodexPauseToggleLabel, CodexTicketBadge } from "./codex-account-pool-helpers";
 import {
   doctorCopyButtonLabel,
@@ -21,6 +23,8 @@ import {
 
 export function CodexAccountPoolCards({
   pool,
+  creditsVisible,
+  loading = false,
   activeId,
   accountModeState,
   switchActionLabel,
@@ -32,6 +36,8 @@ export function CodexAccountPoolCards({
   pauseBusy,
   onPriorityChange,
   priorityUpdatingId,
+  onAutoSwitchThresholdChange,
+  autoSwitchDisabled,
   switchingId,
   pinnedId = null,
   onReauth,
@@ -41,6 +47,8 @@ export function CodexAccountPoolCards({
   doctorCopyOutcomeFor,
 }: {
   pool: CodexAccountEntry[];
+  creditsVisible?: boolean;
+  loading?: boolean;
   activeId: string | null;
   accountModeState: CodexAccountModeState | null;
   switchActionLabel: string;
@@ -52,6 +60,8 @@ export function CodexAccountPoolCards({
   pauseBusy: boolean;
   onPriorityChange: (account: CodexAccountEntry, priority: number) => void;
   priorityUpdatingId: string | null;
+  onAutoSwitchThresholdChange: (account: CodexAccountEntry, threshold: number | null) => Promise<boolean>;
+  autoSwitchDisabled: boolean;
   /** In-flight manual switch, which writes the same pin an order write clears. */
   switchingId: string | null;
   /**
@@ -68,6 +78,7 @@ export function CodexAccountPoolCards({
   doctorCopyOutcomeFor?: (accountId: string) => "copied" | "unavailable" | null;
 }) {
   const t = useT();
+  const { locale } = useI18n();
   const isNext = (account: CodexAccountEntry) => !account.paused && activeId === account.id;
   const idCopy = useCopyFeedback<string>();
   // Which cards have their ⋯ disclosure open; the priority select renders inside it unless
@@ -77,6 +88,7 @@ export function CodexAccountPoolCards({
   return (
     <>
       {pool.map(a => {
+        const showCredits = creditsVisible === true && a.credits !== undefined;
         const healthStatus = a.health?.status;
         const planExcluded = a.selectionExcludedReason === "plan_excluded";
         const showReauth = Boolean(a.needsReauth) || oauthHealthShowsReauth(healthStatus);
@@ -180,19 +192,30 @@ export function CodexAccountPoolCards({
           </div>
           <div className="codex-account-identity">
             <div className="codex-account-identity-copy">{a.email}{a.plan ? ` · ${a.plan}` : ""}</div>
-            {(normalizeAccountPriority(a.priority) !== DEFAULT_ACCOUNT_PRIORITY || moreOpen.has(a.id)) && (
-            <AccountPriorityControl
-              value={a.priority}
-              selectId={`codex-account-priority-${a.id}`}
-              // Every row, not just the one being written: the controller serializes order
-              // writes behind one mutation ref, so a second row's pick would come back "busy"
-              // and be dropped with no toast. Same global lock the pause button uses.
-              // A pending switch counts too — it writes the same pin this clears, so the
-              // controller refuses to overlap them, and that refusal is equally silent.
-              disabled={priorityUpdatingId !== null || switchingId !== null}
-              onChange={(priority) => onPriorityChange(a, priority)}
-            />
-            )}
+            <div className="codex-account-controls">
+              {(normalizeAccountPriority(a.priority) !== DEFAULT_ACCOUNT_PRIORITY || moreOpen.has(a.id)) && (
+                <AccountPriorityControl
+                  value={a.priority}
+                  selectId={`codex-account-priority-${a.id}`}
+                  // Every row, not just the one being written: the controller serializes order
+                  // writes behind one mutation ref, so a second row's pick would come back "busy"
+                  // and be dropped with no toast. Same global lock the pause button uses.
+                  // A pending switch counts too — it writes the same pin this clears, so the
+                  // controller refuses to overlap them, and that refusal is equally silent.
+                  disabled={priorityUpdatingId !== null || switchingId !== null}
+                  onChange={(priority) => onPriorityChange(a, priority)}
+                />
+              )}
+              <AccountAutoSwitchControl
+                key={a.id}
+                accountLabel={a.alias ?? a.email}
+                globalThreshold={threshold}
+                override={a.autoSwitchThresholdOverride}
+                inputId={`codex-account-auto-switch-${a.id}`}
+                disabled={autoSwitchDisabled}
+                onChange={(next) => onAutoSwitchThresholdChange(a, next)}
+              />
+            </div>
           </div>
           {healthSummary && (
             <div className="card-sub faint">{healthSummary}</div>
@@ -206,9 +229,10 @@ export function CodexAccountPoolCards({
                 <QuotaBars
                   quota={a.quota}
                   plan={a.plan}
-                  threshold={threshold}
+                  threshold={a.autoSwitchThresholdOverride ?? threshold}
                   t={t}
-                  pending={a.quota == null}
+                  pending={a.quota == null && (loading || !showCredits)}
+                  afterWeekly={showCredits && !loading ? <CodexCreditsRow credits={a.credits} t={t} locale={locale} /> : undefined}
                 />
               </>}
         </div>

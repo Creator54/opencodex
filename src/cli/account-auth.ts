@@ -2,6 +2,7 @@ import { writeSync } from "node:fs";
 import { modelSelectionGuidance, modelSelectionNextSteps } from "./model-selection-guidance";
 import { warnIfCodexCatalogRefreshPending } from "./account-catalog-refresh";
 import { isCodexResetCreditOperationId } from "../codex/reset-credit-recovery";
+import { BROWSER_LAUNCH_FAILED_NOTICE } from "../lib/browser-launch-notice";
 import {
   CliUsageError,
   printData,
@@ -33,9 +34,9 @@ function writeStdoutFully(text: string): void {
 }
 
 const USAGE = `Usage:
-  ocx account login <provider> [--id <account-id>] [--reauth] [--device] [--code -] [--no-wait] [--json]
+  ocx account login <provider> [--id <account-id>] [--reauth] [--device] [--method builder-id|google|github] [--code -] [--no-wait] [--json]
   ocx account code <provider> [--flow <flow-id>] [--json]   (reads the code from stdin)
-  ocx account cancel <provider> [--flow <flow-id>] [--json]
+  ocx account cancel <provider> [--flow <flow-id>] [--json] (--flow required for codex)
   ocx account reset-credits <account-id|main> [--consume --yes [--operation-id <uuid>]] [--json]
   ocx account grok-reset-coupons [<account-id>] [--consume --yes [--token-id <token-id>] [--operation-id <uuid>]] [--json]
 
@@ -69,13 +70,45 @@ interface LoginStart {
   flowId?: string;
   instructions?: string;
   deviceCode?: string;
+  /** Whether the host actually opened a browser. Absent from older proxies. */
+  browserLaunch?: "started" | "failed" | "skipped";
+  method?: "builder-id" | "google" | "github";
+  userCode?: string;
+  verificationUri?: string;
+  verificationUriComplete?: string;
+  expiresAt?: number;
+  state?: string;
+  warning?: string;
 }
+
+/**
+ * Said only when the host could not open a browser (#5261).
+ *
+ * Without it, a failed launch is indistinguishable from a successful one: the URL is printed
+ * either way, so the user waits at a terminal that looks like it is working. Names the fixed
+ * callback port because that is the part people cannot guess — ChatGPT supplies the redirect
+ * URI, so the flow cannot move to a free port, and `--device` is the way around it.
+ *
+ * Extends the shared notice rather than repeating it: only the second line is specific to this
+ * flow, and the first is the sentence every other login prints for the same failure.
+ */
+export const BROWSER_LAUNCH_FAILED_HINT =
+  BROWSER_LAUNCH_FAILED_NOTICE
+  + "\n   If nothing on this machine can reach http://localhost:1455, rerun with --device instead.";
 
 /** `-` means "read it from stdin", the documented way to pass a code silently. */
 const STDIN_SENTINEL = "-";
 
 /** Providers whose ONLY login is already a device flow; --device is redundant, not wrong. */
 const DEVICE_NATIVE_PROVIDERS = new Set(["kimi", "nous", "github-copilot"]);
+const stripTerminalControls = (value: string): string => value.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, "");
+export function formatKiroDeviceInstructions(start: { verificationUriComplete?: string; verificationUri?: string; userCode?: string; flowId?: string }): string {
+  return [
+    stripTerminalControls(start.verificationUriComplete ?? start.verificationUri ?? ""),
+    start.userCode ? `User code: ${stripTerminalControls(start.userCode)}` : "",
+    start.flowId ? `Flow: ${stripTerminalControls(start.flowId)}` : "",
+  ].filter(Boolean).join("\n");
+}
 
 const ARGV_WARNING =
   "warning: the authorization code was passed as a command-line argument, so it is now in your shell history and was visible in the process list while this ran. Pipe it on stdin instead, or pass `-` to read from stdin.";
@@ -110,9 +143,17 @@ async function login(argv: string[], deps: RuntimeApiDeps): Promise<void> {
   const noWait = takeFlag(args, "--no-wait");
   const reauth = takeFlag(args, "--reauth");
   const device = takeFlag(args, "--device");
+  const method = takeOption(args, "--method");
   const id = takeOption(args, "--id");
   const suppliedCode = takeOptionWithSyntax(args, "--code");
   if (!provider) throw new CliUsageError("provider is required", USAGE);
+  if (method !== undefined) {
+    if (provider !== "kiro" || !["builder-id", "google", "github"].includes(method)) {
+      throw new CliUsageError("--method requires kiro and builder-id, google, or github", USAGE);
+    }
+    if (reauth || id) throw new CliUsageError("native Kiro device login only adds accounts; remove and re-add to reauthenticate", USAGE);
+    if (device || suppliedCode) throw new CliUsageError("--method cannot be combined with --device or --code", USAGE);
+  }
   // A bare leftover here is plausibly the authorization code itself: this flow takes one
   // through --code, and a user who pastes it as a positional would otherwise see it echoed
   // back in the usage error. `ocx login codex` reaches this parser too, so the paste lands
@@ -128,6 +169,30 @@ async function login(argv: string[], deps: RuntimeApiDeps): Promise<void> {
   // Only resolve when --code was actually given: a plain `ocx account login`
   // opens the browser flow and polls, and must not block on stdin.
   const code = await resolveCode(suppliedCode, deps, false);
+
+  if (method) {
+    const start = await runtimeRequest<LoginStart>("/api/oauth/login", {
+      method: "POST", body: JSON.stringify({ provider: "kiro", method }),
+    }, deps);
+    if (!wantsJson) {
+      const block = formatKiroDeviceInstructions(start);
+      if (block) writeStdoutFully(`${block}\n`);
+    }
+    if (noWait) { printData(start, wantsJson, []); return; }
+    if (!start.flowId) throw new CliUsageError("Kiro device login did not return a flow id");
+    for (let attempt = 0; attempt < 450; attempt++) {
+      await Bun.sleep(2_000);
+      const state = await runtimeRequest<LoginStart>(`/api/oauth/status?provider=kiro&flowId=${encodeURIComponent(start.flowId)}`, {}, deps);
+      if (state.state === "done") {
+        printData(state, wantsJson, ["Logged in to kiro.", ...(state.warning ? [`Warning: ${state.warning}`] : [])]);
+        return;
+      }
+      if (state.state === "failed" || state.state === "expired" || state.state === "cancelled") {
+        throw new CliUsageError(`Kiro device login ${state.state}`);
+      }
+    }
+    throw new CliUsageError("Kiro device login timed out");
+  }
 
   if (CODEX_NAMES.has(provider)) {
     const start = await runtimeRequest<LoginStart>("/api/codex-auth/login", {
@@ -145,6 +210,7 @@ async function login(argv: string[], deps: RuntimeApiDeps): Promise<void> {
         start.url ? `Open this URL to sign in:\n${start.url}` : "",
         start.deviceCode ? `Device code: ${start.deviceCode}` : "",
         start.instructions ?? "",
+        start.browserLaunch === "failed" ? BROWSER_LAUNCH_FAILED_HINT : "",
         start.flowId ? `Flow: ${start.flowId}` : "",
       ].filter(line => line !== "").join("\n");
       if (block) writeStdoutFully(`${block}\n`);
@@ -262,13 +328,16 @@ async function cancel(argv: string[], deps: RuntimeApiDeps): Promise<void> {
   const args = [...argv];
   const provider = args.shift()?.trim().toLowerCase();
   const wantsJson = takeFlag(args, "--json");
-  const flowId = takeOption(args, "--flow");
+  const flowId = takeOption(args, "--flow")?.trim();
   if (!provider) throw new CliUsageError("provider is required", USAGE);
   rejectArgs(args, USAGE);
   const codex = CODEX_NAMES.has(provider);
+  if (codex && !flowId) {
+    throw new CliUsageError("Codex login cancel requires --flow <flow-id> (printed by 'ocx account login').", USAGE);
+  }
   const result = await runtimeRequest(codex ? "/api/codex-auth/login/cancel" : "/api/oauth/login/cancel", {
     method: "POST",
-    body: JSON.stringify(codex ? { flowId } : { provider }),
+    body: JSON.stringify(codex ? { flowId } : { provider, ...(provider === "kiro" && flowId ? { flowId } : {}) }),
   }, deps);
   printData(result, wantsJson, [`Cancelled ${provider} login.`]);
 }

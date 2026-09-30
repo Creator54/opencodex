@@ -20,9 +20,9 @@ Pool 모드에서는 선택된 저장 계정이 쿨다운 중이고 사용 가�
 ```toml
 # root keys, before the first table
 model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
-# Auto-injected by opencodex
+# Auto-injected by opencodex (undo: ocx restore)
 openai_base_url = "http://127.0.0.1:10100/v1"
-# Auto-injected by opencodex
+# Auto-injected by opencodex (undo: ocx restore)
 experimental_realtime_ws_base_url = "http://127.0.0.1:10100/v1"
 
 # fastMode를 설정했을 때만 들어갑니다. 설정하지 않으면 [features] 자체가 생기지 않습니다
@@ -169,7 +169,7 @@ model_provider = "opencodex"
 model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 
 # appended at the end of the file
-# Auto-injected by opencodex
+# Auto-injected by opencodex (undo: ocx restore)
 [model_providers.opencodex]
 name = "OpenCodex Proxy"
 base_url = "http://your-host:10100/v1"
@@ -196,7 +196,7 @@ $CODEX_HOME/opencodex-catalog.json
 $CODEX_HOME/models_cache.json
 ```
 
-WSL에서는 `CODEX_HOME`이 비어 있고 Linux `~/.codex/config.toml`도 없을 때 `/mnt/c/Users/*/.codex/config.toml` 아래의 단일 Windows Codex Desktop home도 확인합니다. 후보가 정확히 하나면 그 디렉터리를 사용하므로 WSL app-server mode와 Windows Codex Desktop이 같은 config와 auth 파일을 공유합니다. 이 탐지를 덮으려면 `CODEX_HOME`을 명시하세요.
+WSL에서는 `CODEX_HOME`이 비어 있고 Linux `~/.codex` 디렉터리가 없거나 Codex 상태(`config.toml`, `auth.json`, `sessions`, `history.jsonl`)가 전혀 없을 때 `/mnt/c/Users/*/.codex/config.toml` 아래의 단일 Windows Codex Desktop home도 확인합니다. 후보가 정확히 하나면 그 디렉터리를 사용하므로 WSL app-server mode와 Windows Codex Desktop이 같은 config와 auth 파일을 공유합니다. 이 탐지를 덮으려면 `CODEX_HOME`을 명시하세요.
 
 Windows에서 Orca shell은 `CODEX_HOME`과 `ORCA_CODEX_HOME`을 Orca의 번들 런타임 home으로 설정할 수 있지만, ChatGPT/Codex app은 여전히 `%USERPROFILE%\\.codex`를 읽습니다. `ocx status`와 `ocx doctor`는 이 정확한 불일치를 경고하고, 경로는 가린 채 대상 home을 출력합니다. 해당 Orca shell에서 background service를 설치했다면 먼저 원래 shell에서 uninstall하고, `CODEX_HOME`을 app home으로 설정한 뒤 `ORCA_CODEX_HOME`을 해제하고, sync/restore를 다시 실행한 다음 service를 다시 설치하세요.
 
@@ -256,6 +256,8 @@ Codex는 디스크의 카탈로그(`$CODEX_HOME/opencodex-catalog.json`이 기�
 `exec` 진입점과 Browser 및 Computer Use를 포함한 중첩 MCP 도구를 노출할 수 있으며, opencodex는 모델의 일반
 function call만 라우팅합니다. 도구 실행, 권한, 확인은 Codex에 그대로 남고 opencodex가 별도의 browser 또는
 desktop-control executor를 구현하지는 않습니다.
+
+라우팅된 Responses 턴에서 도구 선언 검증이 명시적으로 켜져 있으면, 선언된 도구 목록을 사용할 수 없을 때도 클라이언트 도구 호출을 거부합니다. 명시적으로 빈 목록은 모든 클라이언트 도구 호출을 거부합니다. Chat과 Anthropic 클라이언트의 도구 검증 책임은 그대로 유지됩니다.
 
 Codex의 `exec` custom-tool grammar를 허용하지 않는 key-auth Responses provider의 경우, opencodex는 해당 선언과
 history를 업스트림 function tool로 인코딩한 다음 스트리밍된 function-call lifecycle을 Codex에 전달하기 전에
@@ -356,6 +358,8 @@ ChatGPT 계정을 추가하거나 재인증할 때 OpenCodex는 일반적으로 
 
 `ocx account refresh openai`와 `ocx account list openai --quota --refresh`는 사용량만 조회합니다. 모델 검증은 할당량을 사용하므로 사람의 대시보드 세션이 필요합니다. 할당량이 복구되면 `ocx gui`를 열고 **Refresh quotas**를 클릭하세요. 헤드리스 호스트도 브라우저에서 해당 대시보드에 접속해야 하며, 관리자 토큰만으로는 검증할 수 없습니다. 일시 정지된 계정도 검증할 수 있지만 일시 정지를 해제하거나 계정을 선택하지는 않습니다. 모델 인증 실패 표시는 검증 또는 재인증에 성공할 때까지 유지됩니다.
 
+**Codex Set → Multi-auth**에서 **Codex Auth** 제목 줄의 **Codex 크레딧** 스위치를 켜면 메인 계정과 풀 계정의 최근 크레딧 잔액이 Week 바로 아래에 표시됩니다. 기본값은 꺼짐이며 `showCodexCredits`로 저장됩니다. 잔액은 로케일에 맞는 숫자로 표시하고, 응답에 따라 무제한 또는 초과 사용 한도 도달 안내를 표시합니다. 전체 크레딧 한도가 제공되지 않으므로 막대는 백분율이 아닌 사용 가능 상태를 나타냅니다. 스위치는 표시만 제어하며 새 로그인에는 해당 계정의 조회 결과가 필요합니다.
+
 별도의 백그라운드 재검증은 기본적으로 꺼져 있습니다. Token Guardian, `openai`의 `proactive` 갱신 정책, `tokenGuardian.codexWarmupEnabled`가 필요하며 등록 검증 대기 계정은 제외합니다.
 
 ### 계정이 요청을 처리하지 못하게 된 이유
@@ -387,11 +391,11 @@ ocx restore    # restore without stopping  (alias: ocx eject)
 ocx restore back # point plain Codex at the running proxy again
 ```
 
-opencodex가 managed [background service](/reference/cli/#ocx-service)로 실행될 때는 `OCX_SERVICE=1`을 설정하므로 service-driven restart가 Codex config를 흔들지 **않습니다**. 네이티브 Codex를 복원하는 것은 명시적인 `ocx stop` / `ocx service stop`뿐입니다.
+opencodex가 managed [background service](/ko/reference/cli/lifecycle/#백그라운드-서비스)로 실행될 때는 `OCX_SERVICE=1`을 설정하므로 service-driven restart가 Codex config를 흔들지 **않습니다**. 네이티브 Codex를 복원하는 것은 명시적인 `ocx stop` / `ocx service stop`뿐입니다.
 
 ## 페이지 분할 기록 보호에 따른 거부
 
-영향받는 기록 저장소가 페이지 분할을 지원하면 프로바이더 전환이 `history_paginated_requires_native_writer`를 반환할 수 있습니다. 이 이유로는 Codex 설정, 참조 프로필, 모델 카탈로그를 더 이상 거부하지 않습니다. `ocx sync`와 `ocx start`는 해당 파일과 `model_catalog_json`을 계속 쓰므로 Codex 모델 선택기에는 OpenCodex가 라우팅하는 모델이 모두 그대로 보입니다. 대화 기록의 프로바이더 재지정을 건너뛰는 것은 이 이유뿐이며, 페이지 분할 순번은 Codex 자체의 네이티브 기록 작성자가 할당하고 재시도해도 달라지지 않기 때문입니다. 읽을 수 없는 상태 데이터베이스, 식별자가 바뀐 대화 원본, 실행하지 못한 사전 검사처럼 다른 기록 사전 검사 이유는 나중에 성공할 수 있으므로 전환 전체를 거부하고 되돌립니다. 이 상태에서 OpenCodex는 페이지 분할 대화 원본이나 스레드 행을 수정하지 않습니다. 기존 대화는 이미 붙어 있는 프로바이더를 유지하고 이전되지 않으며, 새 대화는 평소처럼 프록시를 통해 라우팅됩니다. 재지정을 건너뛸 때 홈에 이미 있던 `[model_providers.opencodex]` 테이블은 폐기하지 않고 유지합니다. root-override(loopback) 형식에서도 같아서, 행이 `opencodex`로 표시된 대화는 아직 존재하는 프로바이더 id를 유지합니다. 변환 가능한 저장소의 `legacy` 행도 포함됩니다. CLI는 `Codex resume history: left to Codex's native writer (history_paginated_requires_native_writer)`를 출력합니다. `ocx restore`와 Codex 설정 제거는 여전히 `history_paginated_requires_native_writer`로 거부됩니다. 스레드 행이 아직 참조하는데 `[model_providers.opencodex]` 정의를 걷어내면 그 대화를 해석할 수 없고, 복원 경로에는 호환 프로바이더 테이블을 남겨 둘 방법이 없습니다. 이미 페이지 분할된 홈은 지금은 제품으로 제거할 수 없습니다. 의도한 동작이 아니라 알려진 미해결 작업입니다.
+영향받는 기록 저장소가 페이지 분할을 지원하면 프로바이더 전환이 `history_paginated_requires_native_writer`를 반환할 수 있습니다. 이 이유로는 Codex 설정, 참조 프로필, 모델 카탈로그를 더 이상 거부하지 않습니다. `ocx sync`와 `ocx start`는 해당 파일과 `model_catalog_json`을 계속 쓰므로 Codex 모델 선택기에는 OpenCodex가 라우팅하는 모델이 모두 그대로 보입니다. 대화 기록의 프로바이더 재지정을 건너뛰는 것은 이 이유뿐이며, 페이지 분할 순번은 Codex 자체의 네이티브 기록 작성자가 할당하고 재시도해도 달라지지 않기 때문입니다. 읽을 수 없는 상태 데이터베이스, 식별자가 바뀐 대화 원본, 실행하지 못한 사전 검사처럼 다른 기록 사전 검사 이유는 나중에 성공할 수 있으므로 전환 전체를 거부하고 되돌립니다. 이 상태에서 OpenCodex는 페이지 분할 대화 원본이나 스레드 행을 수정하지 않습니다. 기존 대화는 이미 붙어 있는 프로바이더를 유지하고 이전되지 않으며, 새 대화는 평소처럼 프록시를 통해 라우팅됩니다. 재지정을 건너뛸 때 홈에 이미 있던 `[model_providers.opencodex]` 테이블은 폐기하지 않고 유지합니다. root-override(loopback) 형식에서도 같아서, 행이 `opencodex`로 표시된 대화는 아직 존재하는 프로바이더 id를 유지합니다. 변환 가능한 저장소의 `legacy` 행도 포함됩니다. CLI는 `Codex resume history: left to Codex's native writer (history_paginated_requires_native_writer)`를 출력합니다. `ocx restore`, `ocx stop`, `ocx uninstall`은 이제 `history_paginated_requires_native_writer`로 거부하지 않습니다. OpenCodex가 넣은 루트 라우팅 키를 모두 걷어내고 `[model_providers.opencodex]` 정의는 디스크에 남기므로, 그 프로바이더를 가리키는 대화는 계속 열리고 plain `codex`는 더 이상 프록시를 향하지 않습니다. 결과는 남겨 둔 줄을 함께 알려 주는 부분 복원으로 보고되며, `ocx restore --remove-codex-provider-table`을 쓰면 그 줄까지 지웁니다. 대신 해당 대화는 열리지 않게 됩니다. 한편 `openai`로 표시된 대화를 Codex가 이미 페이지 분할한 홈에서 프로바이더 테이블 형식으로 통합을 켜면, 예전에는 `history_paginated_openai_requires_native_writer`로 전체가 거부되어 아무것도 쓰이지 않고 통합도 꺼진 채로 남았습니다. 지금은 관리 대상 루트 `openai_base_url` 재정의를 `[model_providers.opencodex]` 테이블과 함께 남겨 두는 방식으로 전환을 끝냅니다. Codex가 이 재정의를 내장 `openai` 프로바이더에 합치므로 해당 대화는 재지정 없이 계속 프록시에 닿고, 대화 원본이나 스레드 행은 건드리지 않습니다. `x-opencodex-api-key` 승인 헤더가 필요한 라우팅 형식만 여전히 거부합니다. 내장 프로바이더가 그 헤더를 실을 수 없기 때문이며, 이때 메시지는 해결 방법 두 가지를 이름으로 알려 줍니다. 루프백 리스너로 Codex를 연결해 재정의를 유지하거나, `syncResumeHistory`를 `false`로 두어 해당 대화가 Codex 자체 OpenAI 엔드포인트로 이어지는 것을 받아들이는 것입니다.
 
 루트 URL 재정의 방식으로 돌아갈 때 OpenCodex는 기록 사전 점검이 통과하더라도 기존 `[model_providers.opencodex]` 정의를 설정 적용 전에 유지합니다. 설정 적용 후나 백그라운드 기록 작업 시작 중에 Codex가 기록 형식을 전환해도 이전 `opencodex` 대화가 제공자를 계속 찾을 수 있습니다. 새 대화는 선택된 루트 제공자를 사용하며, 명시적 복원에는 기존의 별도 제거 검사가 적용됩니다.
 

@@ -8,7 +8,7 @@
  *   - mutation-test the fixture's argv instead of the argv production emits
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,6 +17,8 @@ import {
   type ProbeRunner,
   type RawProbeRunner,
 } from "../../src/service-manager-probe";
+import { buildWindowsServiceScript, buildWindowsTaskXml } from "../../src/service/windows-taskxml";
+import { windowsWscript } from "../../src/service/windows-scheduler";
 import { inspectNativeCodexOwnership } from "../../src/integrations/native/ownership-preflight";
 import { setTrustedWindowsSystemDirectoryResolverForTests } from "../../src/lib/windows-elevation";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -345,7 +347,7 @@ describe("the Windows chain walk", () => {
       "<Task>",
       "  <Actions Context=\"Author\">",
       "    <Exec>",
-      `      <Command>C:\\WINDOWS\\System32\\wscript.exe</Command>`,
+      `      <Command>${windowsWscript()}</Command>`,
       `      <Arguments>/b /nologo &quot;${launcherPath.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}&quot;</Arguments>`,
       "    </Exec>",
       "  </Actions>",
@@ -377,10 +379,31 @@ describe("the Windows chain walk", () => {
       'set "OCX_CLI=C:\\opencodex\\src\\cli\\index.ts"',
       ":loop",
       '>>"%OCX_SERVICE_LOG%" echo start',
-      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100',
+      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100 >>"%OCX_SERVICE_LOG%" 2>&1',
     );
     writeFileSync(path, lines.join("\r\n"));
     return path;
+  }
+
+  function writeStandaloneState(bunPath = "C:\\OpenCodex\\ocx.exe"): string {
+    const path = join(home, ".opencodex", "service-state.json");
+    writeFileSync(path, JSON.stringify({
+      version: 2, codexHome: "C:\\Users\\ws\\.codex",
+      opencodexHome: "C:\\Users\\ws\\.opencodex",
+      backend: "scheduler", bunPath, cliPath: null,
+    }));
+    return path;
+  }
+
+  function writeStandaloneWrapper(bunPath = "C:\\OpenCodex\\ocx.exe"): string {
+    const dir = join(home, ".opencodex");
+    const wrapper = join(dir, "opencodex-service.cmd");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(wrapper, buildWindowsServiceScript({
+      bun: bunPath, bunRuntimeSource: "standalone", cli: null,
+    }, 10100));
+    writeWindowsTask(writeWindowsLauncher(wrapper));
+    return wrapper;
   }
 
   test("the full chain is walked and the homes are extracted", () => {
@@ -409,6 +432,264 @@ describe("the Windows chain walk", () => {
     expect(calls[0].args).toEqual(["/query", "/tn", "opencodex-proxy", "/xml"]);
   });
 
+  test("a production-generated standalone wrapper is accepted", () => {
+    writeStandaloneWrapper();
+    const statePath = writeStandaloneState();
+    const { runRaw } = recorder(() => ({ status: 1, stderr: "ERROR: The system cannot find the file specified." }));
+
+    const result = inspectServiceManagerInstallation({
+      platform: "win32",
+      home,
+      runRaw,
+      winswStatus: () => "nonexistent",
+      statePaths: [statePath],
+    });
+    expect(result.kind).toBe("present");
+    if (result.kind !== "present") return;
+    expect(result.claims).toHaveLength(1);
+    expect(result.claims[0].backend).toBe("scheduler");
+  });
+
+  test("a registered production-generated standalone action establishes native ownership", () => {
+    process.env.CODEX_HOME = "C:\\Users\\ws\\.codex";
+    process.env.OPENCODEX_HOME = "C:\\Users\\ws\\.opencodex";
+    const wrapper = writeStandaloneWrapper();
+    const statePath = writeStandaloneState();
+    const launcher = join(home, ".opencodex", "opencodex-service-launcher.vbs");
+    const registeredXml = buildWindowsTaskXml(wrapper, launcher, undefined, "S-1-5-21-123");
+    const { runRaw } = recorder(() => ({ status: 0, stdout: registeredXml }));
+    expect(inspectNativeCodexOwnership({
+      platform: "win32", home, runRaw, winswStatus: () => "nonexistent", statePaths: [statePath],
+      configDir: join(home, ".opencodex"),
+      currentHomes: { codexHome: process.env.CODEX_HOME, opencodexHome: process.env.OPENCODEX_HOME },
+    }).ownership).toBe("owned");
+  });
+
+  test.each([
+    ["foreign command", (xml: string) => xml.replace(/<Command>[^<]*<\/Command>/, "<Command>C:\\foreign\\proxy.exe</Command>")],
+    ["extra Exec action", (xml: string) => xml.replace("</Actions>", "<Exec><Command>C:\\foreign\\proxy.exe</Command></Exec></Actions>")],
+  ])("a registered standalone task with %s cannot establish native ownership", (_, mutate) => {
+    process.env.CODEX_HOME = "C:\\Users\\ws\\.codex";
+    process.env.OPENCODEX_HOME = "C:\\Users\\ws\\.opencodex";
+    const wrapper = writeStandaloneWrapper();
+    const statePath = writeStandaloneState();
+    const launcher = join(home, ".opencodex", "opencodex-service-launcher.vbs");
+    const registeredXml = mutate(buildWindowsTaskXml(wrapper, launcher, undefined, "S-1-5-21-123"));
+    const { runRaw } = recorder(() => ({ status: 0, stdout: registeredXml }));
+    const deps = {
+      platform: "win32" as const, home, runRaw, winswStatus: () => "nonexistent" as const,
+      statePaths: [statePath], configDir: join(home, ".opencodex"),
+      currentHomes: { codexHome: process.env.CODEX_HOME, opencodexHome: process.env.OPENCODEX_HOME },
+    };
+    expect(inspectServiceManagerInstallation(deps).kind).toBe("unknown");
+    expect(inspectNativeCodexOwnership(deps).ownership).toBe("unknown");
+  });
+
+  test.each([
+    "goto stopped",
+    "exit /b 0",
+    "call C:\\foreign\\proxy.cmd",
+    ":foreign",
+    "echo foreign",
+  ])("a standalone wrapper with an inserted control line is unknown: %s", inserted => {
+    const wrapper = writeStandaloneWrapper();
+    const statePath = writeStandaloneState();
+    writeFileSync(wrapper, readFileSync(wrapper, "utf8").replace(
+      '"%OCX_BUN%" start --port 10100',
+      `${inserted}\r\n"%OCX_BUN%" start --port 10100`,
+    ));
+    const { runRaw } = recorder(() => ({ status: 1, stderr: "ERROR: The system cannot find the file specified." }));
+    expect(inspectServiceManagerInstallation({
+      platform: "win32", home, runRaw, winswStatus: () => "nonexistent", statePaths: [statePath],
+    }).kind).toBe("unknown");
+  });
+
+  test("an unreachable standalone launch cannot establish native ownership", () => {
+    process.env.CODEX_HOME = "C:\\Users\\ws\\.codex";
+    process.env.OPENCODEX_HOME = "C:\\Users\\ws\\.opencodex";
+    const wrapper = writeStandaloneWrapper();
+    const statePath = writeStandaloneState();
+    const { runRaw } = recorder(() => ({ status: 1, stderr: "ERROR: The system cannot find the file specified." }));
+    const deps = {
+      platform: "win32" as const, home, runRaw, winswStatus: () => "nonexistent" as const,
+      statePaths: [statePath], configDir: join(home, ".opencodex"),
+      currentHomes: { codexHome: process.env.CODEX_HOME, opencodexHome: process.env.OPENCODEX_HOME },
+    };
+    expect(inspectNativeCodexOwnership(deps).ownership).toBe("owned");
+    writeFileSync(wrapper, readFileSync(wrapper, "utf8").replace(
+      '"%OCX_BUN%" start --port 10100',
+      'goto stopped\r\n"%OCX_BUN%" start --port 10100',
+    ));
+    expect(inspectNativeCodexOwnership(deps).ownership).toBe("unknown");
+  });
+
+  test("a production-generated source wrapper remains accepted", () => {
+    const dir = join(home, ".opencodex");
+    const wrapper = join(dir, "opencodex-service.cmd");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(wrapper, buildWindowsServiceScript({
+      bun: "C:\\OpenCodex\\bun.exe", bunRuntimeSource: "bundled",
+      cli: "C:\\OpenCodex\\src\\cli\\index.ts",
+    }, 10100));
+    writeWindowsTask(writeWindowsLauncher(wrapper));
+    const { runRaw } = recorder(() => ({ status: 1, stderr: "ERROR: The system cannot find the file specified." }));
+    expect(inspectServiceManagerInstallation({
+      platform: "win32", home, runRaw, winswStatus: () => "nonexistent",
+    }).kind).toBe("present");
+  });
+
+  test("a direct launch without an OCX_BUN assignment is unknown", () => {
+    const wrapper = writeStandaloneWrapper();
+    const statePath = writeStandaloneState();
+    writeFileSync(wrapper, readFileSync(wrapper, "utf8").replace(/^set "OCX_BUN=.*"\r?\n/im, ""));
+    const { runRaw } = recorder(() => ({ status: 1, stderr: "ERROR: The system cannot find the file specified." }));
+    expect(inspectServiceManagerInstallation({
+      platform: "win32", home, runRaw, winswStatus: () => "nonexistent", statePaths: [statePath],
+    }).kind).toBe("unknown");
+  });
+
+  test.each([
+    ['set "OCX_WINDOWS_WRAPPER_PROTOCOL=1"\r\n', ""],
+    ['set "OCX_BUN_RUNTIME_SOURCE=standalone"', 'set "OCX_BUN_RUNTIME_SOURCE=bundled"'],
+    ['set "OCX_BUN=C:\\OpenCodex\\ocx.exe"', 'set OCX_BUN=C:\\OpenCodex\\ocx.exe'],
+  ])("a direct launch with a missing generator marker is unknown: %s", (original, replacement) => {
+    const wrapper = writeStandaloneWrapper();
+    const statePath = writeStandaloneState();
+    writeFileSync(wrapper, readFileSync(wrapper, "utf8").replace(original, replacement));
+    const { runRaw } = recorder(() => ({ status: 1, stderr: "ERROR: The system cannot find the file specified." }));
+    expect(inspectServiceManagerInstallation({
+      platform: "win32", home, runRaw, winswStatus: () => "nonexistent", statePaths: [statePath],
+    }).kind).toBe("unknown");
+  });
+
+  test("a direct launch without independent install state is unknown", () => {
+    writeStandaloneWrapper();
+    const { runRaw } = recorder(() => ({ status: 1, stderr: "ERROR: The system cannot find the file specified." }));
+    expect(inspectServiceManagerInstallation({
+      platform: "win32", home, runRaw, winswStatus: () => "nonexistent",
+      statePaths: [join(home, ".opencodex", "service-state.json")],
+    }).kind).toBe("unknown");
+  });
+
+  test.each(['set OCX_CLI=C:\\foreign\\index.ts', '@set "OCX_CLI=C:\\foreign\\index.ts"', 'set "OCX_CLI=C:\\foreign\\index.ts"\r\nset OCX_CLI=C:\\other\\index.ts'])(
+    "a direct launch with a mixed or unquoted CLI assignment is unknown: %s", assignment => {
+      const wrapper = writeStandaloneWrapper();
+      const statePath = writeStandaloneState();
+      writeFileSync(wrapper, readFileSync(wrapper, "utf8").replace(":loop", `${assignment}\r\n:loop`));
+      const { runRaw } = recorder(() => ({ status: 1, stderr: "ERROR: The system cannot find the file specified." }));
+      expect(inspectServiceManagerInstallation({
+        platform: "win32", home, runRaw, winswStatus: () => "nonexistent", statePaths: [statePath],
+      }).kind).toBe("unknown");
+    },
+  );
+
+  test("a direct launch with an extra shell command is unknown", () => {
+    const wrapper = writeStandaloneWrapper();
+    const statePath = writeStandaloneState();
+    writeFileSync(wrapper, readFileSync(wrapper, "utf8").replace(
+      '"%OCX_BUN%" start --port 10100 >>"%OCX_SERVICE_LOG%" 2>&1',
+      '"%OCX_BUN%" start --port 10100 & echo foreign',
+    ));
+    const { runRaw } = recorder(() => ({ status: 1, stderr: "ERROR: The system cannot find the file specified." }));
+    expect(inspectServiceManagerInstallation({
+      platform: "win32", home, runRaw, winswStatus: () => "nonexistent", statePaths: [statePath],
+    }).kind).toBe("unknown");
+  });
+
+  test("a foreign direct-launch executable stays unknown despite valid scheduler state", () => {
+    writeStandaloneWrapper("C:\\foreign\\proxy.exe");
+    const statePath = writeStandaloneState();
+    const { runRaw } = recorder(() => ({ status: 1, stderr: "ERROR: The system cannot find the file specified." }));
+    const deps = {
+      platform: "win32" as const, home, runRaw, winswStatus: () => "nonexistent" as const,
+      statePaths: [statePath], configDir: join(home, ".opencodex"),
+    };
+    expect(inspectServiceManagerInstallation(deps).kind).toBe("unknown");
+    expect(inspectNativeCodexOwnership({
+      ...deps, currentHomes: { codexHome: "C:\\Users\\ws\\.codex", opencodexHome: "C:\\Users\\ws\\.opencodex" },
+    }).ownership).toBe("unknown");
+  });
+
+  test("a source wrapper that drops its CLI argument is unknown", () => {
+    const wrapper = writeWindowsWrapper("C:\\a\\.codex", "C:\\a\\.opencodex");
+    writeFileSync(wrapper, readFileSync(wrapper, "utf8").replace(
+      '"%OCX_BUN%" "%OCX_CLI%" start',
+      '"%OCX_BUN%" start',
+    ));
+    const launcher = writeWindowsLauncher(wrapper);
+    writeWindowsTask(launcher);
+    const { runRaw } = recorder(() => ({ status: 1, stderr: "ERROR: The system cannot find the file specified." }));
+
+    expect(inspectServiceManagerInstallation({
+      platform: "win32",
+      home,
+      runRaw,
+      winswStatus: () => "nonexistent",
+    }).kind).toBe("unknown");
+  });
+
+  test("a source wrapper with an extra standalone launch is unknown", () => {
+    const wrapper = writeWindowsWrapper("C:\\a\\.codex", "C:\\a\\.opencodex");
+    writeFileSync(wrapper, readFileSync(wrapper, "utf8").replace(
+      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100 >>"%OCX_SERVICE_LOG%" 2>&1',
+      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100\r\n"%OCX_BUN%" start --port 10100',
+    ));
+    const launcher = writeWindowsLauncher(wrapper);
+    writeWindowsTask(launcher);
+    const { runRaw } = recorder(() => ({ status: 1, stderr: "ERROR: The system cannot find the file specified." }));
+
+    expect(inspectServiceManagerInstallation({
+      platform: "win32", home, runRaw, winswStatus: () => "nonexistent",
+    }).kind).toBe("unknown");
+  });
+
+  test("a source wrapper with an appended shell command is unknown", () => {
+    const wrapper = writeWindowsWrapper("C:\\a\\.codex", "C:\\a\\.opencodex");
+    writeFileSync(wrapper, readFileSync(wrapper, "utf8").replace(
+      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100 >>"%OCX_SERVICE_LOG%" 2>&1',
+      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100 >>"%OCX_SERVICE_LOG%" 2>&1 & echo foreign',
+    ));
+    const launcher = writeWindowsLauncher(wrapper);
+    writeWindowsTask(launcher);
+    const { runRaw } = recorder(() => ({ status: 1, stderr: "ERROR: The system cannot find the file specified." }));
+
+    expect(inspectServiceManagerInstallation({
+      platform: "win32", home, runRaw, winswStatus: () => "nonexistent",
+    }).kind).toBe("unknown");
+  });
+
+  test("a source wrapper without an OCX_BUN assignment is unknown", () => {
+    const wrapper = writeWindowsWrapper("C:\\a\\.codex", "C:\\a\\.opencodex");
+    writeFileSync(wrapper, readFileSync(wrapper, "utf8").replace(/^set "OCX_BUN=.*"\r?\n/im, ""));
+    const launcher = writeWindowsLauncher(wrapper);
+    writeWindowsTask(launcher);
+    const { runRaw } = recorder(() => ({ status: 1, stderr: "ERROR: The system cannot find the file specified." }));
+
+    expect(inspectServiceManagerInstallation({
+      platform: "win32", home, runRaw, winswStatus: () => "nonexistent",
+    }).kind).toBe("unknown");
+  });
+
+  test("a standalone wrapper with an extra source launch is unknown", () => {
+    const dir = join(home, ".opencodex");
+    const wrapper = join(dir, "opencodex-service.cmd");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(wrapper, buildWindowsServiceScript({
+      bun: "C:\\OpenCodex\\ocx.exe", bunRuntimeSource: "standalone", cli: null,
+    }, 10100).replace(
+      '"%OCX_BUN%" start --port 10100',
+      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100\r\n"%OCX_BUN%" start --port 10100',
+    ));
+    const statePath = writeStandaloneState();
+    const launcher = writeWindowsLauncher(wrapper);
+    writeWindowsTask(launcher);
+    const { runRaw } = recorder(() => ({ status: 1, stderr: "ERROR: The system cannot find the file specified." }));
+
+    expect(inspectServiceManagerInstallation({
+      platform: "win32", home, runRaw, winswStatus: () => "nonexistent", statePaths: [statePath],
+    }).kind).toBe("unknown");
+  });
+
   test("a registered task whose chain disagrees with the staged definition is unknown", () => {
     const wrapper = writeWindowsWrapper("C:\\Users\\ws\\.codex", "C:\\Users\\ws\\.opencodex");
     const launcher = writeWindowsLauncher(wrapper);
@@ -423,14 +704,11 @@ describe("the Windows chain walk", () => {
       'set "OCX_BUN=C:\\bun\\bun.exe"',
       'set "OCX_CLI=C:\\opencodex\\src\\cli\\index.ts"',
       ":loop",
-      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100',
+      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100 >>"%OCX_SERVICE_LOG%" 2>&1',
     ].join("\r\n"));
     const foreignLauncher = join(home, ".opencodex", "foreign-launcher.vbs");
     writeFileSync(foreignLauncher, `shell.Run """${foreignWrapper}""", 0, True\r\n`);
-    const registeredXml = [
-      '<?xml version="1.0" encoding="UTF-16"?>',
-      `<Arguments>/b /nologo &quot;${foreignLauncher}&quot;</Arguments>`,
-    ].join("\n");
+    const registeredXml = windowsTaskXmlFor(foreignLauncher);
     const { runRaw } = recorder(() => ({ status: 0, stdout: registeredXml }));
 
     const result = inspectServiceManagerInstallation({ platform: "win32", home, runRaw, winswStatus: () => "nonexistent" });
@@ -451,7 +729,7 @@ describe("the Windows chain walk", () => {
       'set "OCX_BUN=C:\\bun\\bun.exe"',
       'set "OCX_CLI=C:\\opencodex\\src\\cli\\index.ts"',
       ":loop",
-      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100',
+      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100 >>"%OCX_SERVICE_LOG%" 2>&1',
     ].join("\r\n"));
     const launcher = writeWindowsLauncher(wrapper);
     writeWindowsTask(launcher);
@@ -478,7 +756,7 @@ describe("the Windows chain walk", () => {
       'set "OCX_BUN=C:\\bun\\bun.exe"',
       'set "OCX_CLI=C:\\opencodex\\src\\cli\\index.ts"',
       ":loop",
-      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100',
+      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100 >>"%OCX_SERVICE_LOG%" 2>&1',
     ].join("\r\n"));
     const launcher = writeWindowsLauncher(wrapper);
     writeWindowsTask(launcher);
@@ -530,7 +808,7 @@ describe("the Windows chain walk", () => {
       'set "OCX_BUN=C:\\bun\\bun.exe"',
       'set "OCX_CLI=C:\\opencodex\\src\\cli\\index.ts"',
       ":loop",
-      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100',
+      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100 >>"%OCX_SERVICE_LOG%" 2>&1',
     ].join("\r\n"));
     const launcher = join(custom, "opencodex-service-launcher.vbs");
     writeFileSync(launcher, `shell.Run """${wrapper}""", 0, True\r\n`);
@@ -819,7 +1097,7 @@ describe("ownership refuses what it cannot prove", () => {
    * homedir(), which no test sandbox moves. Left alone, these fixtures would
    * read the developer's real installation and call their own machine foreign.
    */
-  function own(extra: { run: ProbeRunner }) {
+  function own(extra: { run: ProbeRunner; realpathSync?: (path: string) => string }) {
     const codexHome = join(home, ".codex");
     const opencodexHome = join(home, ".opencodex");
     return {
@@ -861,7 +1139,57 @@ describe("ownership refuses what it cannot prove", () => {
     const { opencodexHome } = useHomes();
     writeState(opencodexHome, "/elsewhere/.codex", "/elsewhere/.opencodex");
     const { run } = recorder(() => ({ status: 113 }));
-    expect(inspectNativeCodexOwnership(own({ run })).ownership).toBe("foreign");
+    // Identity resolution keeps this comparison lexical so it proves "different", not "unknown".
+    const realpathSync = (path: string) => path;
+    expect(inspectNativeCodexOwnership(own({ run, realpathSync })).ownership).toBe("foreign");
+  });
+
+  /*
+   * A realpath failure (EACCES, EPERM, a directory that vanished mid-compare,
+   * transient I/O) is not evidence the home is different. Collapsing it to
+   * "different" would make the unattended preflight report a definitive
+   * foreign install — and wrongly block stop, repair, uninstall, and native
+   * writes with incorrect recovery guidance — on nothing but an I/O hiccup.
+   */
+  test("an unresolvable recorded home is unknown, not foreign", () => {
+    const { codexHome, opencodexHome } = useHomes();
+    const recordedHome = join(home, "recorded-alias");
+    writeState(opencodexHome, recordedHome, opencodexHome);
+    const { run } = recorder(() => ({ status: 113 }));
+    const realpathSync = (path: string) => {
+      if (path === recordedHome) throw Object.assign(new Error("access denied"), { code: "EACCES" });
+      return path;
+    };
+
+    const result = inspectNativeCodexOwnership(own({ run, realpathSync }));
+    expect(result.ownership).toBe("unknown");
+    expect(result.reason).toContain("could not be resolved");
+    expect(result.reason).not.toContain("foreign");
+  });
+
+  // A differently spelled recorded home that no longer exists cannot be an alias of the current
+  // home. It stays foreign, so a stale mount keeps refusing restore and startup writes.
+  test("a vanished, differently spelled recorded home stays foreign", () => {
+    const { opencodexHome } = useHomes();
+    const recordedHome = join(home, "unmounted-home");
+    writeState(opencodexHome, recordedHome, opencodexHome);
+    const { run } = recorder(() => ({ status: 113 }));
+    const realpathSync = (path: string) => {
+      if (path === recordedHome) throw Object.assign(new Error("absent"), { code: "ENOENT" });
+      return path;
+    };
+    expect(inspectNativeCodexOwnership(own({ run, realpathSync })).ownership).toBe("foreign");
+  });
+
+  // An older install may have recorded a junction or symlink spelling of the
+  // home this process now knows canonically — same directory, different name.
+  test("state spelling the current home through an alias is owned", () => {
+    const { codexHome, opencodexHome } = useHomes();
+    const aliasHome = join(home, "codex-alias");
+    writeState(opencodexHome, aliasHome, opencodexHome);
+    const { run } = recorder(() => ({ status: 113 }));
+    const realpathSync = (path: string) => path === aliasHome ? codexHome : path;
+    expect(inspectNativeCodexOwnership(own({ run, realpathSync })).ownership).toBe("owned");
   });
 
   /*
@@ -876,7 +1204,10 @@ describe("ownership refuses what it cannot prove", () => {
     writePlist("/elsewhere/.codex", "/elsewhere/.opencodex");
     const { run } = recorder(() => ({ status: 113 }));
 
-    const result = inspectNativeCodexOwnership(own({ run }));
+    // Identity resolution keeps the claim comparison lexical: the fixture
+    // intends a genuinely different home, not an unresolvable one.
+    const realpathSync = (path: string) => path;
+    const result = inspectNativeCodexOwnership(own({ run, realpathSync }));
     expect(result.ownership).toBe("unknown");
     expect(result.reason).toContain("different homes");
   });
@@ -956,7 +1287,7 @@ describe("ownership refuses what it cannot prove", () => {
       'set "OCX_BUN=C:\\bun\\bun.exe"',
       'set "OCX_CLI=C:\\opencodex\\src\\cli\\index.ts"',
       ":loop",
-      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100',
+      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100 >>"%OCX_SERVICE_LOG%" 2>&1',
     ].join("\r\n"));
     const launcher = join(opencodexHome, "opencodex-service-launcher.vbs");
     writeFileSync(launcher, `shell.Run """${wrapper}""", 0, True\r\n`);
@@ -992,7 +1323,7 @@ describe("ownership refuses what it cannot prove", () => {
       'set "OCX_BUN=C:\\bun\\bun.exe"',
       'set "OCX_CLI=C:\\opencodex\\src\\cli\\index.ts"',
       ":loop",
-      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100',
+      '"%OCX_BUN%" "%OCX_CLI%" start --port 10100 >>"%OCX_SERVICE_LOG%" 2>&1',
     ].join("\r\n"));
     const launcher = join(opencodexHome, "opencodex-service-launcher.vbs");
     writeFileSync(launcher, `shell.Run """${wrapper}""", 0, True\r\n`);
