@@ -490,16 +490,15 @@ describe("google adapter — Antigravity system prompt compatibility", () => {
     expect(systemInstructionText(envelope.request)).not.toContain(REJECTED_CLAUDE_SDK_PARAGRAPH);
   });
 
-  test("preserves the paragraph for a Cloud Code Assist model that does not reject it", async () => {
-    // Membership is probe-established per generation, so a model with no recorded rejection
-    // keeps its system prompt byte-identical. Claude-on-Antigravity is the natural control:
-    // the paragraph is literally true for it.
-    const parsed = systemPromptParsed("claude-sonnet-4-6");
-    const envelope = JSON.parse((await createGoogleAdapter(ccaProvider).buildRequest(parsed)).body) as {
-      request: Record<string, unknown>;
-    };
+  test("removes the paragraph for every Cloud Code Assist model, including Claude", async () => {
+    // Probed 2026-10-01: Claude, GPT-OSS and Gemini Pro on CCA all answer 429 RESOURCE_EXHAUSTED
+    // with this paragraph, so Claude Code requests looked quota-blocked on accounts with quota.
+    for (const modelId of ["claude-sonnet-4-6", "claude-opus-4-6-thinking", "gemini-3.1-pro", "gpt-oss-120b-medium"]) {
+      const built = await createGoogleAdapter(ccaProvider).buildRequest(systemPromptParsed(modelId));
+      const envelope = JSON.parse(built.body) as { request: Record<string, unknown> };
 
-    expect(systemInstructionText(envelope.request)).toContain(REJECTED_CLAUDE_SDK_PARAGRAPH);
+      expect(systemInstructionText(envelope.request)).not.toContain(REJECTED_CLAUDE_SDK_PARAGRAPH);
+    }
   });
 
   test("preserves the paragraph outside Cloud Code Assist", async () => {
