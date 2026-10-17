@@ -532,8 +532,9 @@ Native steering generation overrides, explicit public-API eligibility and the co
 
 Dashboard Fast-row persistence and client refresh follow the [Fast selector rows setting contract](../gui-and-management-api.md#fast-selector-rows-setting).
 
-
 ## Account refusal and rotation boundaries
+
+`src/lib/errors.ts` treats the explicit upstream message “The usage limit has been reached” as exhausted quota rather than transient throttling. `src/lib/retry-after.ts` therefore supplies no synthetic two-second retry hint for that message; validated upstream headers and stated reset delays still win. Bare 429s and ordinary rate-limit messages retain retry backoff. `tests/server/retry-after-429.test.ts` covers this distinction; it changes neither account rotation eligibility nor model selection.
 
 Native Responses uses the existing pre-stream OAuth HTTP-429 account rotation: account quorum and
 cooldown remain in force, while generic OAuth uses the stable snapshot ceiling described below. The

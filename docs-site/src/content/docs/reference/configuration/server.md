@@ -618,6 +618,8 @@ Request-specific classifier routing recognizes the security-monitor system promp
 
 Translated classifier requests with an explicit classifier route receive at least 8,192 output tokens so reasoning can finish before the XML verdict. Larger limits are preserved. Ordinary turns keep their requested limits and selected models; native Anthropic passthrough keeps its original limits.
 
+HTTP 429 can mean temporary throttling or exhausted quota. An explicit upstream message such as “The usage limit has been reached” is classified as quota exhaustion and receives no synthetic two-second retry hint. Valid upstream retry headers and stated reset delays are preserved; ordinary rate-limit errors still receive retry backoff. Retrying cannot replenish exhausted quota.
+
 The compatibility policy applies to Claude Code, Desktop and other clients using translated
 Messages, including `?beta=true` and non-streaming requests. Every translated target uses the
 same conservative policy, including Anthropic and native Responses adapters. It rejects

@@ -38,6 +38,15 @@ describe("resolveClientRetryAfter (#507)", () => {
     })).toBeUndefined();
   });
 
+  test("spent GPT usage windows do not get a rapid retry hint", () => {
+    const message = "The usage limit has been reached";
+    expect(resolveClientRetryAfter({ status: 429, message })).toBeUndefined();
+    expect(resolveClientRetryAfter({ status: 429, message, upstreamRetryAfter: "3600" })).toBe("3600");
+    expect(resolveClientRetryAfter({ status: 429, message: `${message}. Try again in 120s.` })).toBe("120");
+    const response = formatPassthroughUpstreamError(429, JSON.stringify({ error: { message } }));
+    expect(response.headers.get("Retry-After")).toBeNull();
+  });
+
   test("does not invent Retry-After for non-429 statuses", () => {
     expect(resolveClientRetryAfter({
       status: 503,

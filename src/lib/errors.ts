@@ -425,6 +425,7 @@ export function classifyError(status: number, type: string, message: string): Oc
   }
   if (
     text.includes("insufficient_quota") ||
+    /\busage limit (?:has been )?reached\b/.test(text) ||
     text.includes("exceeded your current quota") ||
     text.includes("quota exhausted") ||
     text.includes("account quota exceeded") ||
