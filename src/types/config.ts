@@ -84,14 +84,13 @@ export interface OcxClaudeCodeConfig {
   /** Inbound model id remaps: exact id first, then date-stripped (`-\d{8}$`). */
   modelMap?: Record<string, string>;
   /**
-   * Explicit classifier model for Claude Code Auto Mode safety checks (e.g. "RelayA/claude-opus-5").
-   * When unset, bare classifier requests check modelMap, then same-provider affinity from
-   * `claudeCode.model`, then compatible Anthropic-adapter providers, and finally fallbacks.
+   * Explicit provider/model or combo/id target for recognized Claude Code Auto Mode safety checks.
+   * Ordinary requests keep their selected model, even when it shares the classifier's model ID.
    */
   classifierModel?: string;
   /**
-   * Ordered fallback candidates for Claude Code Auto Mode classifier routing when the primary
-   * classifier route is not available.
+   * Ordered classifier targets used when classifierModel is unset; the first non-empty entry wins.
+   * These are configuration alternatives, not retries after upstream failures.
    */
   classifierFallbacks?: string[];
   /**

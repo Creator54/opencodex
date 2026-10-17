@@ -154,7 +154,7 @@ there. Feature code is grouped by responsibility:
 
 | Group | Directories |
 | --- | --- |
-| Data plane | `src/adapters/`, `src/responses/`, `src/chat/`, `src/claude/`, `src/grok/`, `src/images/`, `src/vision/`, `src/web-search/` |
+| Data plane | `src/adapters/`, `src/responses/`, `src/chat/`, `src/claude/`, `src/grok/`, `src/images/`, `src/vision/`, `src/web-search/`; [request-specific auto-mode classifier routing](clients/claude-desktop.md#auto-mode-classifier-routing) precedes Messages alias decoding and native passthrough. |
 | Codex integration | `src/codex/`, `src/combos/`, `src/providers/`, `src/oauth/` |
 | Surfaces | `src/server/`, `src/cli/`, `src/tray/`, `src/github/` |
 | Evidence and contracts | `src/compatibility/`, `src/lab/` |

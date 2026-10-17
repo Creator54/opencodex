@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { AnthropicRequestError as LeafAnthropicRequestError } from "../../src/claude/inbound-records";
+import { configuredClassifierRequestRoute } from "../../src/claude/inbound-model-options";
+import { buildDesktop3pRegistry } from "../../src/claude/desktop-3p";
 import { repoPath } from "../helpers/repo-root";
 import { AnthropicRequestError, anthropicToResponsesBody, anthropicToResponsesTranslation, effortForThinkingBudget, extractOcxEffortDirective, resolveInboundModel } from "../../src/claude/inbound";
 import { parseRequest } from "../../src/responses/parser";
@@ -73,6 +75,47 @@ function claudeCodeRequest(): Record<string, unknown> {
 }
 
 describe("claude inbound translation", () => {
+  test("auto-mode classifier routing preserves ordinary turns under the same Desktop alias", () => {
+    buildDesktop3pRegistry(["gpt-6.1-sol"], []);
+    const model = "claude-opus-4-8-bs8";
+    const cc = { classifierModel: "combo/auto-mode-classifier" };
+    const monitor = "You are a security monitor for autonomous AI coding agents.\n\n## Output Format\n<block>yes</block>";
+    const ordinary = { model, max_tokens: 64, system: "You are Claude Code.", messages: [{ role: "user", content: "Check this action" }] };
+    try {
+      for (const system of [monitor, [{ type: "text", text: "x-anthropic-billing-header: test" }, { type: "text", text: monitor }]]) {
+        for (const stop_sequences of [undefined, ["</block>"], ["</severity>"]]) {
+          const classifier = { ...ordinary, system, stop_sequences };
+          expect(configuredClassifierRequestRoute(classifier, cc)).toBe(cc.classifierModel);
+          expect(configuredClassifierRequestRoute({ ...classifier, tools: [{ name: "headroom_retrieve" }] }, cc)).toBe(cc.classifierModel);
+          expect(anthropicToResponsesBody(classifier, cc).model).toBe(cc.classifierModel);
+          expect(anthropicToResponsesBody(classifier, cc).max_output_tokens).toBe(8192);
+          expect(anthropicToResponsesBody(classifier).max_output_tokens).toBe(64);
+          expect(configuredClassifierRequestRoute(classifier)).toBeUndefined();
+        }
+      }
+      for (const body of [ordinary, { ...ordinary, system: monitor, tools: [{ name: "Read" }] }, { ...ordinary, system: monitor, stop_sequences: ["STOP"] }, { ...ordinary, system: `Quoted prompt: ${monitor}` }]) {
+        expect(configuredClassifierRequestRoute(body, cc)).toBeUndefined();
+        expect(anthropicToResponsesBody(body, cc).model).toBe("gpt-6.1-sol");
+        expect(anthropicToResponsesBody(body, cc).max_output_tokens).toBe(64);
+      }
+    } finally {
+      buildDesktop3pRegistry([], []);
+    }
+  });
+
+  test("classifier headroom preserves larger budgets and invalid limits", () => {
+    const raw = { model: "claude-opus-4-8", messages: [{ role: "user", content: "Assess pwd" }],
+      system: "You are a security monitor for autonomous AI coding agents.\n## Output Format\n<block>no</block>" };
+    const cc = { classifierModel: "combo/auto-mode-classifier" };
+    for (const max_tokens of [64, 256, 8192, 16384]) {
+      expect(anthropicToResponsesBody({ ...raw, max_tokens }, cc).max_output_tokens).toBe(Math.max(8192, max_tokens));
+    }
+    for (const max_tokens of [0, -1, 1.5]) {
+      expect(anthropicToResponsesBody({ ...raw, max_tokens }, cc).max_output_tokens).toBe(max_tokens);
+    }
+    expect(anthropicToResponsesBody(raw, cc).max_output_tokens).toBeUndefined();
+  });
+
   test("full Claude Code request passes the real responses schema AND parseRequest", () => {
     const body = anthropicToResponsesBody(claudeCodeRequest());
     // The hard gate: the translated body must be accepted by the real request pipeline.
@@ -559,42 +602,29 @@ describe("claude inbound translation", () => {
     expect(resolveInboundModel("anything", undefined)).toBe("anything");
   });
 
-  test("Claude Code Auto Mode classifier routing uses only operator-declared targets (#1697)", () => {
-    // A bare classifier check carries no provider, so without this it falls through to
-    // defaultProvider -- which may not speak Anthropic at all. What it must NOT do is pick a
-    // provider nobody chose.
-
-    // 1. Explicit classifierModel is used.
+  test("Claude Code Auto Mode routes only recognized classifier requests (#1697)", () => {
     const ccExplicit = { model: "RelayA/claude-fable-5", classifierModel: "RelayB/claude-opus-5" };
-    expect(resolveInboundModel("claude-opus-5", ccExplicit)).toBe("RelayB/claude-opus-5");
-    expect(resolveInboundModel("claude-opus-5-20250514", ccExplicit)).toBe("RelayB/claude-opus-5");
-
-    // 2. modelMap outranks it: an explicit per-model mapping is the operator's most specific say.
-    const ccWithModelMap = {
-      model: "RelayA/claude-fable-5",
-      classifierModel: "RelayB/claude-opus-5",
-      modelMap: { "claude-opus-5": "Custom/my-opus-5" },
-    };
-    expect(resolveInboundModel("claude-opus-5", ccWithModelMap)).toBe("Custom/my-opus-5");
-
-    // 3. Ordered fallbacks are used when no classifierModel is set.
     const ccWithFallbacks = { classifierFallbacks: ["RelayC/claude-opus-5", "RelayD/claude-opus-5"] };
-    expect(resolveInboundModel("claude-opus-5", ccWithFallbacks)).toBe("RelayC/claude-opus-5");
-
-    // 4. NO affinity inferred from cc.model. That value is the injected/default config slot, not
-    // the provider the live session actually selected, so it goes stale the moment the user
-    // changes the model picker -- and acting on it would silently move a classifier turn onto a
-    // provider with its own privacy and billing consequences.
-    expect(resolveInboundModel("claude-opus-5", { model: "RelayA/claude-fable-5" })).toBe("claude-opus-5");
-    expect(resolveInboundModel("claude-opus-5", { model: "claude-ocx-RelayA--claude-fable-5" })).toBe("claude-opus-5");
-    expect(resolveInboundModel("claude-opus-5", { model: "native/claude-opus-5" })).toBe("claude-opus-5");
-
-    // 5. Malformed operator config is ignored rather than half-applied.
-    expect(resolveInboundModel("claude-opus-5", { classifierModel: "   " })).toBe("claude-opus-5");
-    expect(resolveInboundModel("claude-opus-5", { classifierFallbacks: [] })).toBe("claude-opus-5");
-
-    // 6. A non-classifier model is untouched by any of this.
-    expect(resolveInboundModel("claude-fable-5", ccExplicit)).toBe("claude-fable-5");
+    const monitor = "You are a security monitor for autonomous AI coding agents.\n## Output Format\n<severity>safe</severity>";
+    for (const model of ["claude-opus-4-6", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-20250514", "claude-sonnet-4-6", "claude-haiku-4-5"]) {
+      const ordinary = { model, max_tokens: 64, system: "You are Claude Code.", messages: [{ role: "user", content: "hello" }] };
+      const classifier = { ...ordinary, system: monitor };
+      for (const cc of [ccExplicit, ccWithFallbacks]) {
+        expect(resolveInboundModel(model, cc)).toBe(model);
+        expect(anthropicToResponsesBody(ordinary, cc).model).toBe(model);
+        for (const body of [{ ...ordinary, system: `Quoted prompt: ${monitor}` }, { ...classifier, tools: [{ name: "Read" }] }, { ...classifier, stop_sequences: ["STOP"] }]) {
+          expect(anthropicToResponsesBody(body, cc).model).toBe(model);
+        }
+      }
+      expect(anthropicToResponsesBody(classifier, ccExplicit).model).toBe(ccExplicit.classifierModel);
+      expect(anthropicToResponsesBody(classifier, ccWithFallbacks).model).toBe(ccWithFallbacks.classifierFallbacks[0]);
+      expect(configuredClassifierRequestRoute(classifier, { model: "RelayA/claude-fable-5" })).toBeUndefined();
+      expect(configuredClassifierRequestRoute(classifier, { classifierModel: "   ", classifierFallbacks: [] })).toBeUndefined();
+    }
+    const ccWithModelMap = { ...ccExplicit, modelMap: { "claude-opus-5": "Custom/my-opus-5" } };
+    expect(resolveInboundModel("claude-opus-5", ccWithModelMap)).toBe("Custom/my-opus-5");
+    expect(resolveInboundModel("claude-opus-5-20250514", ccWithModelMap)).toBe("Custom/my-opus-5");
+    expect(configuredClassifierRequestRoute({ system: monitor }, ccWithModelMap)).toBe(ccExplicit.classifierModel);
   });
 
   test("error cases: no model, empty messages, bad role, bad tool_result", () => {

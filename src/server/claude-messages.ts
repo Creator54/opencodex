@@ -22,6 +22,7 @@ import { createToolCallIdAllocator } from "../adapters/tool-call-id";
 import { openAIChatSerializesThinking } from "../adapters/openai-chat/messages";
 import { messagesToResponsesTranslation } from "../protocols/codecs/messages";
 import { AnthropicRequestError, DesktopModelMappingUnavailableError, extractOcxEffortDirective, extractOcxRouteDirective, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
+import { configuredClassifierRequestRoute } from "../claude/inbound-model-options";
 import { isKnownDesktop3pModelId, resolveDesktop3pAlias } from "../claude/desktop-3p";
 import { resolveAlias, claudeCodeNativeAlias, legacyAliasForNative } from "../claude/alias";
 import { recordDesktopRequest } from "../claude/desktop-health";
@@ -132,8 +133,7 @@ function decodeClaudeFastSelector(raw: string, cc?: OcxConfig["claudeCode"]): st
   if (resolveAlias(model) || isKnownDesktop3pModelId(model)
     || (typeof fullMapping === "string" && fullMapping.length > 0)) return exact;
   const bare = model.slice(0, -"--fast".length);
-  // A classifier fallback is not an exact match for a registered Desktop base.
-  // Preserve established non-Desktop fallback behavior while decoding that base first.
+  // Prefer a registered Desktop base over a date-stripped modelMap match.
   if (exact !== model && !resolveDesktop3pAlias(bare)) return exact;
   const decodedBase = resolveInboundModel(bare, cc);
   return decodedBase === bare ? exact : `${decodedBase}--fast`;
@@ -838,7 +838,7 @@ async function handleClaudeMessagesWithBudget(
       }
     }
     if (isRec(anthropicBody) && typeof anthropicBody.model === "string") {
-      anthropicBody.model = decodeFablePickerAlias(anthropicBody.model, cc);
+      anthropicBody.model = configuredClassifierRequestRoute(anthropicBody, cc) ?? decodeFablePickerAlias(anthropicBody.model, cc);
     }
     if (isRec(anthropicBody) && typeof anthropicBody.model === "string") {
       requestedModel = anthropicBody.model;
@@ -1598,7 +1598,7 @@ export async function handleClaudeCountTokens(
       model = stripOneMillionMarker(countRoute);
       raw.model = model;
     }
-    model = decodeFablePickerAlias(model, cc);
+    model = configuredClassifierRequestRoute(raw, cc) ?? decodeFablePickerAlias(model, cc);
     raw.model = model;
     // Fast-only: count_tokens never parsed an effort row, so it must not start. It returns a
     // token estimate and sends no tier, so only the IDENTITY is corrected - without this the

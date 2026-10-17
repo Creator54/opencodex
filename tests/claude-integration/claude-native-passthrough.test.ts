@@ -96,6 +96,39 @@ function claudeBody(): Record<string, unknown> {
   };
 }
 
+test("classifier targets preserve ordinary Opus passthrough on Messages and token counts", async () => {
+  const selected: Captured[] = [];
+  const classified: Captured[] = [];
+  const upstream = mockAnthropicUpstream(selected);
+  const classifier = mockAnthropicUpstream(classified);
+  const config = cfg(upstream.url.origin, { classifierModel: "classifier/verdict" });
+  config.providers.classifier = { adapter: "anthropic", baseUrl: classifier.url.origin, apiKey: "sk-ant-test-key", allowPrivateNetwork: true, models: ["verdict"] };
+  saveConfig(config);
+  const server = startServer(0);
+  try {
+    for (const system of ["You are Claude Code.", "You are a security monitor for autonomous AI coding agents.\n## Output Format\n<block>no</block>"]) {
+      const body = { model: "claude-opus-4-6", max_tokens: 64, stream: true, system, messages: [{ role: "user", content: "hello" }] };
+      for (const path of ["/v1/messages", "/v1/messages/count_tokens"]) {
+        const response = await postNative(String(server.url), path, body);
+        expect(response.status).toBe(200);
+        if (path.endsWith("count_tokens")) {
+          const { input_tokens } = await response.json() as { input_tokens: number };
+          expect(input_tokens).toBeGreaterThan(0);
+          if (system === "You are Claude Code.") expect(input_tokens).toBe(4242);
+          else expect(input_tokens).not.toBe(4242);
+        } else expect(await response.text()).toContain("message_stop");
+      }
+    }
+    expect(selected.map(hit => hit.body.model)).toEqual(["claude-opus-4-6", "claude-opus-4-6"]);
+    expect(selected.map(hit => hit.path)).toEqual(["/v1/messages", "/v1/messages/count_tokens"]);
+    expect(classified.map(hit => hit.body.model)).toEqual(["verdict"]);
+  } finally {
+    await server.stop(true);
+    upstream.stop(true);
+    classifier.stop(true);
+  }
+});
+
 test("unmapped claude model + sk-ant credential passes through verbatim", async () => {
   const captured: Captured[] = [];
   const upstream = mockAnthropicUpstream(captured);

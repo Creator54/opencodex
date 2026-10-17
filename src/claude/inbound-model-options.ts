@@ -6,11 +6,6 @@ import { isUnresolvedDesktop3pAlias, resolveDesktop3pAlias } from "./desktop-3p"
 import { validDateAlias } from "./desktop-profile";
 import { AnthropicRequestError, DesktopModelMappingUnavailableError, isRec, type Rec } from "./inbound-records";
 
-function isClaudeClassifierModel(model: string): boolean {
-  const stripped = model.replace(/-\d{8}$/, "");
-  return /^claude-opus-[45]/.test(stripped);
-}
-
 /**
  * Explicitly configured classifier route for Claude Code Auto Mode safety checks (#1697).
  *
@@ -36,7 +31,25 @@ function configuredClassifierRoute(cc?: OcxClaudeCodeConfig): string | undefined
   return undefined;
 }
 
-/** Alias first, then modelMap: exact id, then date-suffix-stripped (`-\d{8}$`), then classifier affinity/config, else passthrough. */
+/** Classifier turns can use the same registered alias as ordinary coding turns. */
+export function configuredClassifierRequestRoute(raw: unknown, cc?: OcxClaudeCodeConfig): string | undefined {
+  const target = configuredClassifierRoute(cc);
+  if (!target || !isRec(raw)) return undefined;
+  // Headroom can add its retrieval tool even to a classifier's originally tool-free request.
+  if (raw.tools !== undefined && (!Array.isArray(raw.tools)
+    || raw.tools.some(tool => !isRec(tool) || tool.name !== "headroom_retrieve"))) return undefined;
+  if (raw.stop_sequences !== undefined && (!Array.isArray(raw.stop_sequences)
+    || raw.stop_sequences.some(stop => stop !== "</block>" && stop !== "</severity>"))) return undefined;
+  const system = typeof raw.system === "string" ? [raw.system]
+    : Array.isArray(raw.system) ? raw.system.filter(isRec).filter(block => block.type === "text").map(block => block.text) : [];
+  // shortcut: Claude 2.1.292 prompt signature, update if its classifier prompt changes.
+  const classifier = system.some(text => typeof text === "string"
+    && text.trimStart().startsWith("You are a security monitor for autonomous AI coding agents.")
+    && text.includes("## Output Format") && (text.includes("<block>") || text.includes("<severity>")));
+  return classifier ? target : undefined;
+}
+
+/** Alias first, then modelMap: exact id, then date-suffix-stripped (`-\d{8}$`), else passthrough. */
 export function resolveInboundModel(model: string, cc?: OcxClaudeCodeConfig): string {
   // Defensive: Desktop/CLI strip the [1m] context-variant marker client-side, but a
   // leaking build must not break alias decode (devlog 138 — the 1M signal is the
@@ -66,13 +79,6 @@ export function resolveInboundModel(model: string, cc?: OcxClaudeCodeConfig): st
   const dateless = map[stripped];
   if (typeof dateless === "string" && dateless.length > 0) return dateless;
 
-  // Claude Code Auto Mode classifier routing (#1697). Bare classifier checks such as
-  // `claude-opus-5` carry no provider, so without this they fall through to defaultProvider --
-  // which may not speak Anthropic at all. Only an operator-declared target is used.
-  if (isClaudeClassifierModel(model)) {
-    const configured = configuredClassifierRoute(cc);
-    if (configured) return configured;
-  }
   return model;
 }
 

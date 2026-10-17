@@ -1,5 +1,11 @@
 # Claude Desktop Integration
 
+## Auto mode classifier routing
+
+Recognized, explicitly routed classifiers translated by `src/claude/inbound.ts` receive at least 8,192 output tokens, since Responses and Gemini count reasoning against the same limit as the XML verdict. Larger allowances are preserved; invalid limits, unconfigured classifiers, native passthrough, and ordinary requests retain their limits. This headroom does not change the configured effort or Auto Mode verdict parsing.
+
+`src/claude/inbound-model-options.ts` recognizes Claude Code 2.1.292's security-monitor system prompt and XML verdict contract before registered model aliases are decoded. `src/server/claude-messages.ts` applies the operator-declared `claudeCode.classifierModel` or first configured `classifierFallbacks` entry before native passthrough on Messages and token-count requests; `src/claude/inbound.ts` uses the same decision for standalone translation. Ordinary coding turns keep their existing alias resolution; bare Opus model IDs alone never activate classifier routing. The detector accepts Headroom's injected `headroom_retrieve` tool but refuses other tools or unrelated stop sequences. A changed classifier prompt remains on the existing route until the signature is updated; no target is inferred when classifier routing is unset. `tests/claude-integration/claude-inbound.test.ts` checks both classifier stages and ordinary turns sharing a Desktop alias or bare model ID; `tests/claude-integration/claude-native-passthrough.test.ts` verifies separate selected and classifier upstreams.
+
 Native result continuations and function-result injection follow [the mode-specific result and control contract](../transports/streaming-health.md#experimental-native-function-result-injection); this surface does not infer upstream support or alter its defaults.
 Explicit Codex CLI installation observation does not launch or reconfigure a desktop client. See the [read-only observation contract](../runtime.md#explicit-codex-cli-installation-observation).
 

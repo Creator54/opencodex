@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
 export { AnthropicRequestError, DesktopModelMappingUnavailableError } from "./inbound-records";
 export { resolveInboundModel, effortForThinkingBudget, effortFromOutputConfig, extractOcxRouteDirective, extractOcxEffortDirective } from "./inbound-model-options";
 import { AnthropicRequestError, isRec, type Rec } from "./inbound-records";
-import { resolveInboundModel, effortForThinkingBudget, effortFromOutputConfig, formatFromOutputConfig } from "./inbound-model-options";
+import { configuredClassifierRequestRoute, resolveInboundModel, effortForThinkingBudget, effortFromOutputConfig, formatFromOutputConfig } from "./inbound-model-options";
 import { systemToInstructions, toolsToResponses, toolChoiceToResponses } from "./inbound-content-options";
 import { stabilizeClaudeInstructionsForPromptCache } from "./inbound-cache-stabilize";
 import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../responses/reasoning-envelope";
@@ -415,8 +415,9 @@ function translateAnthropicRequest(
     else throw new AnthropicRequestError(`unsupported message role: ${String(msg.role)}`);
   }
 
+  const classifierRoute = configuredClassifierRequestRoute(raw, cc);
   const body: Rec = {
-    model: resolveInboundModel(raw.model, cc),
+    model: classifierRoute ?? resolveInboundModel(raw.model, cc),
     input,
     store: false,
     stream: raw.stream === true,
@@ -453,7 +454,11 @@ function translateAnthropicRequest(
   if (tools) body.tools = tools;
   toolChoiceToResponses(raw.tool_choice, body);
 
-  if (typeof raw.max_tokens === "number") body.max_output_tokens = raw.max_tokens;
+  if (typeof raw.max_tokens === "number") {
+    // Translated classifier limits include reasoning; Claude's 64/256-token verdict budget does not.
+    body.max_output_tokens = classifierRoute && Number.isSafeInteger(raw.max_tokens) && raw.max_tokens > 0
+      ? Math.max(8192, raw.max_tokens) : raw.max_tokens;
+  }
   if (typeof raw.temperature === "number") body.temperature = raw.temperature;
   if (typeof raw.top_p === "number") body.top_p = raw.top_p;
   // top_k: accepted and dropped (no Responses equivalent).
