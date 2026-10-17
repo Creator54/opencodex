@@ -63,12 +63,20 @@ function lockPathForStatePath(statePath: string): string {
 function lockOwnerProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (error) {
     // EPERM means the process exists but this account cannot signal it. Unknown failures
     // also fail closed: only ESRCH proves the holder is gone.
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
   }
+  if (process.platform === "linux") {
+    try {
+      const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      if (cmdline.length === 0) return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    }
+  }
+  return true;
 }
 
 function sameIdentity(

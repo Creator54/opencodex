@@ -36,8 +36,20 @@ export function unprivilegedOwnershipMutationEnvironment(environment) {
 
 function sleep(ms) { Atomics.wait(sleeper, 0, 0, ms); }
 function processAlive(pid) {
-  try { process.kill(pid, 0); return true; }
-  catch (error) { return error?.code !== "ESRCH"; }
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+  }
+  if (process.platform === "linux") {
+    try {
+      const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      if (cmdline.length === 0) return false;
+    } catch (error) {
+      if (error?.code === "ENOENT") return false;
+    }
+  }
+  return true;
 }
 
 function leasePath(statePaths) {

@@ -565,6 +565,26 @@ describe("the anchor lock", () => {
     expect(readServiceInstallState()?.backend).toBe("scheduler");
   });
 
+  test("kernel threads with empty cmdline are recognized as not alive and reclaimed", () => {
+    if (process.platform !== "linux") return;
+    const leasePath = serviceStatePath() + ".mutation.lock";
+    const processInstance = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const token = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    mkdirSync(leasePath, { recursive: true });
+    // PID 2 is kthreadd on Linux: kill(2, 0) throws EPERM, but /proc/2/cmdline is empty.
+    writeFileSync(`${leasePath}/v1-2-${processInstance}-${token}.json`, JSON.stringify({
+      version: 1, pid: 2, processInstance, token, createdAt: 1,
+    }));
+    writeServiceInstallState("scheduler", null, {
+      paths: [serviceStatePath()],
+      mutationLease: {
+        waitMs: 0,
+        now: () => Date.now() + 60_000,
+      },
+    });
+    expect(readServiceInstallState()?.backend).toBe("scheduler");
+  });
+
   test("age never evicts a holder whose PID is still alive", () => {
     const lockPath = serviceStatePath() + ".lock";
     const processInstance = "11111111-1111-4111-8111-111111111111";
