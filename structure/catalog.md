@@ -478,6 +478,8 @@ The shared Responses path follows the [bounded multipart recovery contract](suba
 Ultra is always advertised in the catalog regardless of the `multi_agent_v2` toggle. The v2 toggle
 controls only the multi-agent collab surface, not ultra visibility. The `nativeEffortClamp` function
 wire-clamps ultra/max to each model's real top rung (e.g. gpt-5.5 ultra → xhigh on the wire).
+For native models with a known ladder that excludes `none`, it maps an explicit disabled-thinking
+request to the lowest supported ranked effort; supported `none` and unknown ladders stay unchanged.
 
 For routed models, `modelSuppressSyntheticMax` is a catalog-only per-model setting. A true value
 prevents `src/codex/catalog/effort.ts` from adding a missing synthetic `max` and prevents

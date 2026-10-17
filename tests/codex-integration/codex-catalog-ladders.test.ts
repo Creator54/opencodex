@@ -215,6 +215,30 @@ describe("catalog ultra (always-on)", () => {
 });
 
 describe("mock-max wire clamp (nativeEffortClamp)", () => {
+  test("disabled Claude thinking uses the lowest supported native effort", async () => {
+    const { anthropicToResponsesBody } = await import("../../src/claude/inbound");
+    const body = anthropicToResponsesBody({
+      model: "gpt-6.1-sol", max_tokens: 64, thinking: { type: "disabled" },
+      messages: [{ role: "user", content: "test" }],
+    });
+    expect(body.reasoning).toEqual({ effort: "none" });
+    expect(nativeEffortClamp("gpt-6.1-sol", "none")).toBe("low");
+    expect(nativeEffortClamp("gpt-6.1-sol", "low")).toBeNull();
+    expect(nativeEffortClamp("gpt-6.1-sol", undefined)).toBeNull();
+    expect(nativeEffortClamp("gpt-totally-unknown", "none")).toBeNull();
+    expect(nativeEffortClamp("provider/gpt-6.1-sol", "none")).toBeNull();
+  });
+
+  test("a native ladder that supports none preserves it", async () => {
+    const { UPSTREAM_NATIVE_ENTRIES } = await import("../../src/codex/catalog/metadata");
+    const slug = "test-native-none";
+    UPSTREAM_NATIVE_ENTRIES.set(slug, { slug, supported_reasoning_levels: [{ effort: "none" }, { effort: "low" }] });
+    try {
+      expect(nativeEffortClamp(slug, "none")).toBeNull();
+    } finally {
+      UPSTREAM_NATIVE_ENTRIES.delete(slug);
+    }
+  });
   test("gpt-5.5 max/ultra clamp to its real top rung (xhigh)", () => {
     expect(nativeEffortClamp("gpt-5.5", "max")).toBe("xhigh");
     expect(nativeEffortClamp("gpt-5.5", "ultra")).toBe("xhigh");

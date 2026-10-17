@@ -8,7 +8,7 @@ import { clearModelCache, DEFAULT_MODEL_CACHE_TTL_MS, getFreshCached, getStaleCa
 import { buildModelsRequest, resolveModelsAuthToken } from "../../oauth";
 import type { OcxConfig, OcxProviderConfig } from "../../types";
 import { modelInList } from "../../types";
-import { CODEX_REASONING_LEVELS, codexEffortRank, configuredReasoningEfforts, modelRecordValue, sanitizeCodexReasoningEfforts, type CodexReasoningLevel } from "../../reasoning-effort";
+import { CODEX_REASONING_LEVELS, codexEffortRank, configuredReasoningEfforts, modelRecordValue, resolveEffortAtOrBelow, sanitizeCodexReasoningEfforts, type CodexReasoningLevel } from "../../reasoning-effort";
 import { getModelMetadata, getModelMetadataCaseInsensitive, listModelMetadata, resolveMetadataProvider } from "../../generated/model-metadata";
 import { enrichProviderFromRegistry, shouldCaseFoldMetadataModelId } from "../../providers/derive";
 import { getProviderRegistryEntry } from "../../providers/registry";
@@ -50,6 +50,15 @@ import {
 } from "../runtime";
 
 export function nativeEffortClamp(slug: string, effort: string | undefined): string | null {
+  if (effort === "none" && !slug.includes("/")) {
+    const levels = UPSTREAM_NATIVE_ENTRIES.get(slug)?.supported_reasoning_levels;
+    const supported = Array.isArray(levels)
+      ? levels.flatMap(level => typeof level?.effort === "string" ? [level.effort] : [])
+      : [];
+    // Claude helper turns disable thinking even on native models that cannot disable it.
+    return supported.length > 0 && !supported.includes("none")
+      ? resolveEffortAtOrBelow(effort, supported) ?? null : null;
+  }
   if (!effort || (effort !== "max" && effort !== "ultra")) return null;
   if (slug.includes("/")) return null; // routed models map efforts in their adapters
   const entry = UPSTREAM_NATIVE_ENTRIES.get(slug);

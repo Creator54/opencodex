@@ -631,7 +631,9 @@ management, containers, inference placement and unsupported protocol fields or b
 Unset preserves legacy translation. Cache hints, tool input examples and ordinary
 thinking/effort settings are deliberately admitted with possible degradation: this setting
 does not guarantee cache breakpoints or TTL, retained examples, exact thinking budgets or
-lossless translation. Beta headers alone are not validated for feature support. Shadow
+lossless translation. On native ChatGPT routes, disabled thinking uses the lowest supported
+reasoning effort when the model's known ladder excludes `none`; models supporting `none`
+keep it unchanged. Beta headers alone are not validated for feature support. Shadow
 evidence contains only fixed protocol codes and derived reasons, retained in request logs
 and `usage.jsonl` and restored on restart. An invalid non-unset mode returns a fixed 503
 configuration error on translated Messages. Configure the value in `config.json` and
