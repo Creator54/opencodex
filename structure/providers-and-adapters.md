@@ -596,3 +596,5 @@ owns the selection rule.
 
 Preflight heartbeat retention keeps `replayUnsafe` sticky in the replayed tail, so a second
 preflight cannot forget earlier side effects after the original marker is evicted.
+
+OpenCode CLI advertises client schemas through a request-scoped loopback MCP capture server. It captures one call, terminates the CLI, and closes on all exit paths. Native tools remain denied; the client retains approval and execution.

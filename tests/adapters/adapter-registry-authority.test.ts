@@ -10,6 +10,9 @@ import type { OcxParsedRequest, OcxProviderConfig } from "../../src/types";
 import { withTestTranslatorBudget } from "../helpers/translator-budget";
 
 const EXPECTED_ADAPTER_NAMES = {
+  // bedrock rides the registry on the custom-checkout merge of main 2.74.0; its row exists there
+  // and its runtime name matches its id, so the roster gains it here rather than dropping the gate.
+  bedrock: "bedrock",
   codebuddy: "codebuddy",
   "command-code": "command-code",
   "openai-chat": "openai-chat",
@@ -25,6 +28,10 @@ const EXPECTED_ADAPTER_NAMES = {
   "mimo-free": "mimo-free",
   qoder: "qoder",
   "claude-cli": "claude-cli",
+  // The adapter's `name` matches its registry key; the id is the wire-independent identity
+  // `getAdapterDefinition` + `createRegisteredAdapter` resolve (see the effectiveAdapterContract
+  // loop). The opencode-cli entry carries codebuddy's contract ancestry without its frames.
+  "opencode-cli": "opencode-cli",
 } as const;
 
 function provider(adapter: string): OcxProviderConfig {

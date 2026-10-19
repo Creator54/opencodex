@@ -269,3 +269,7 @@ Dashboard Fast-row persistence and client refresh follow the [Fast selector rows
 The registered Devin implementation in `src/adapters/devin.ts` maps data URLs to its native image field. Its textual fallback accepts only bounded HTTPS references and emits a fixed-size omission marker for unsupported or oversized values.
 
 A [compaction routing override](../transports/responses-failover.md#compaction-routing-overrides) selects its target before adapter resolution and uses the existing registry factory.
+
+The `opencode-cli` adapter uses official CLI NDJSON rather than the coding-agent stream-json
+parser. Its isolated MCP catalog reuses CodeBuddy schema validation, captures one client tool
+call per turn, and executes no tool locally. Native tool frames still fail closed.

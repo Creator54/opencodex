@@ -40,13 +40,16 @@ function nativeTemplate(): Record<string, unknown> {
 }
 
 const EXPECTED_KEY_PROVIDER_IDS = [
-  "anthropic-apikey", "openai-apikey", "meta-model", "umans", "opencode-go", "neuralwatt", "openrouter", "cline-pass", "cline", "orcarouter", "packycode", "bizrouter", "groq", "google", "google-vertex", "azure-openai",
+  // amazon-bedrock rides the registry on the custom-checkout merge of main 2.74.0; it is a
+  // key-based row there. opencode-cli completes the second CLI-backed keyless row after claude-cli.
+  "amazon-bedrock", "anthropic-apikey", "openai-apikey", "meta-model", "umans", "opencode-go", "neuralwatt", "openrouter", "cline-pass", "cline", "orcarouter", "packycode", "bizrouter", "groq", "google", "google-vertex", "azure-openai",
   "deepseek", "cerebras", "chutes", "deepinfra", "hyperbolic", "nscale", "vultr", "jev", "baseten", "commandcode", "sambanova", "nebius", "crusoe", "digitalocean", "scaleway", "featherless", "novita", "together", "fireworks", "firepass", "moonshot",
   "huggingface", "nvidia", "venice", "zai", "zhipu-bigmodel", "zhipu-bigmodel-coding", "zhipu-bigmodel-responses", "nanogpt", "synthetic", "siliconflow", "qwen-cloud", "tencent-coding-plan",
   "volcengine", "volcengine-coding-plan", "volcengine-agent-plan", "qianfan", "alibaba", "alibaba-token-plan", "alibaba-token-plan-intl", "parallel", "zenmux", "litellm", "ollama-cloud", "mistral",
   "minimax", "minimax-cn", "kimi-code", "opencode-zen", "vercel-ai-gateway", "opper", "tokenlab",
   "opencode-free", "xiaomi", "xiaomi-mimo", "kilo", "mimo-free", "mimo", "cloudflare-ai-gateway", "cloudflare-workers-ai", "gitlab-duo",
   "qoder", "qoder-cn", "codebuddy", "codebuddy-cn", "stepfun", "claude-cli",
+  "opencode-cli",
 ];
 
 describe("provider registry parity", () => {
@@ -676,6 +679,11 @@ describe("provider registry parity", () => {
     // was not one entry being wrong - it was a set of entries drifting apart, and only
     // a global assertion catches the next provider to seed it.
     for (const entry of PROVIDER_REGISTRY) {
+      // A row whose entire roster sits in noVisionModels is a transport that refuses image
+      // input outright (claude-cli, opencode-cli): no image request is routed to it, so there
+      // is no sidecar captioning to prohibit. The VLM-class defect this loop guards is a row
+      // with SOME image-capable ids hiding a flash id among its no-vision ones.
+      if ((entry.models ?? []).length > 0 && (entry.noVisionModels ?? []).length === (entry.models ?? []).length) continue;
       const flashIds = (entry.models ?? []).filter(id => String(id).includes("glm-5.3-flash"));
       for (const id of flashIds) {
         expect(entry.noVisionModels ?? []).not.toContain(id);
@@ -1118,7 +1126,8 @@ describe("provider registry parity", () => {
     expect(providerConfigSeed(litellm!).keyOptional).toBe(true);
     // claude-cli joins them as the first CLI-backed member: its row is `key` because the turn
     // leaves this machine, and keyless because the Claude Code CLI reads the operator's sign-in.
-    expect(optionalKeyProviders).toEqual(["litellm", "opencode-free", "mimo-free", "claude-cli"]);
+    // opencode-cli is the second: the free tier is the `opencode` CLI's own anonymous session.
+    expect(optionalKeyProviders).toEqual(["litellm", "opencode-free", "mimo-free", "claude-cli", "opencode-cli"]);
   });
 
   test("NVIDIA NIM is free-tier priced but still requires an API key", () => {

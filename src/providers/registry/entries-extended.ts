@@ -118,6 +118,9 @@ import {
   ANTHROPIC_MODEL_REASONING_EFFORTS,
   ANTHROPIC_REASONING_EFFORTS,
   ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+  OPENCODE_CLI_MODELS,
+  OPENCODE_CLI_MODEL_CONTEXT_WINDOWS,
+  OPENCODE_CLI_MODEL_MAX_OUTPUT_TOKENS,
 } from "./model-seeds";
 
 export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
@@ -1554,5 +1557,41 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     modelReasoningEfforts: { ...ANTHROPIC_MODEL_REASONING_EFFORTS },
     defaultMaxOutputTokens: ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
     note: "Runs Claude subscription traffic through Anthropic's own harness: the official Claude Code CLI headlessly (`claude -p`), one turn per request. OpenCodex stores no Claude token, reads none and injects none — the CLI signs in and bills the account itself, which is why this row is keyless and an API key saved here never reaches the harness (use `anthropic-apikey` for key billing). The sign-in is the one of the user this proxy runs as, so every request served through this row — by any client of this proxy — spends that same account; OpenCodex neither pools nor multiplexes Claude sign-ins. Requires the CLI (`npm i -g @anthropic-ai/claude-code`) and a signed-in session (`claude` -> /login). v1 disables CLI tools (--tools \"\", --strict-mcp-config) so the client retains tool ownership: text/reasoning only for now. Subscription routing authorization flagged for maintainer review.",
+  },
+  {
+    // The official OpenCode CLI as the keyless transport to the free tier (§三十一). The free
+    // tier refuses everything but turns from the CLI's own session (the measured 403 FreeTierError
+    // behind `opencode-free`'s refusal note), and the CLI's shell wrapper is what opencode.ai
+    // authenticates — so the legitimate transport IS the binary, never a replayed free-tier
+    // request. This row runs the official `opencode` binary headlessly (`opencode run --pure`),
+    // one turn per request: OpenCodex stages a private turn dir whose staged agent denies every
+    // capability (`read` stays declared-but-nowhere, per the PR #137 gate evidence), folds the
+    // request prompt over stdin (`echo prompt | opencode run`), and maps the NDJSON frames back.
+    // No token exists to store: the free tier is the CLI session's anonymous property.
+    // Client tools use a capture-only MCP bridge — the client harness keeps tool ownership; a native tool attempt fails
+    // the turn closed rather than executing anything.
+    id: "opencode-cli",
+    label: "OpenCode Free (CLI)",
+    adapter: "opencode-cli",
+    baseUrl: "https://opencode.ai",
+    // Keyless like claude-cli: `keyOptional` exempts the row from key enforcement without
+    // claiming a key exists, and keeps it listed by `deriveProviderPresets`.
+    authKind: "key",
+    keyOptional: true,
+    dashboardUrl: "https://opencode.ai/docs/cli/",
+    defaultModel: "glm-5.3-flash-free",
+    models: [...OPENCODE_CLI_MODELS],
+    // Static roster, exactly like the CodeBuddy/claude-cli rows: the CLI route never serves a
+    // model list; the roster above is a dated CLI snapshot, not live discovery.
+    liveModels: false,
+    modelContextWindows: { ...OPENCODE_CLI_MODEL_CONTEXT_WINDOWS },
+    modelMaxOutputTokens: { ...OPENCODE_CLI_MODEL_MAX_OUTPUT_TOKENS },
+    // Text-only regardless of each id's advertised attachment capability. `run` accepts image
+    // frames only through `-f` paths, which the adapter never constructs, and the free-tier
+    // roster's attachment flag is unverified on this headless route: advertising a modality
+    // the route cannot honour is how a picture gets answered blind. The adapter refuses
+    // direct image input for the same reason; the vision sidecar still captions images into text.
+    noVisionModels: [...OPENCODE_CLI_MODELS],
+    note: "Runs OpenCode free-tier traffic through the official `opencode` CLI headlessly (`opencode run --pure`), one turn per request. OpenCodex stores no token and reads none — the free tier is the CLI's own anonymous session, so there is no key to save; a key entry here never reaches the CLI. Every request served through this row spends the machine's free-tier quota only. Requires the CLI: `curl -fsSL https://opencode.ai/install | bash` (or `npm i -g opencode-ai`). The turn runs as a staged agent with every OpenCode tool denied — the client harness owns execution, text/reasoning and client-owned tool calls for now. Data use follows OpenCode's free-tier terms (https://opencode.ai/docs/zen/ vs cli docs): prompts may be retained for training — do not send confidential material.",
   },
 ];

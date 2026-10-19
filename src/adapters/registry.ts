@@ -9,6 +9,7 @@ import { createCodeBuddyAdapter } from "./codebuddy/adapter";
 import { createQoderAdapter } from "./qoder/adapter";
 import { createCommandCodeAdapter } from "./command-code";
 import { createCursorAdapter } from "./cursor";
+import { createOpenCodeCliAdapter } from "./opencode-cli/adapter";
 import { createDevinAdapter } from "./devin";
 import { createGoogleAdapter } from "./google";
 import { createKiroAdapter } from "./kiro";
@@ -153,6 +154,16 @@ export const ADAPTER_REGISTRY = {
     // and the CLI owns the credential: the adapter stores and injects none.
     contractParent: "codebuddy",
     create: (provider: OcxProviderConfig, _context: AdapterFactoryContext) => createClaudeCliAdapter(provider),
+  },
+  "opencode-cli": {
+    // The official OpenCode CLI is the only legitimate transport to the free tier: the gate
+    // refuses anything but turns from the CLI's own session, and the turn runs as a staged
+    // permission-denied agent under the fetched binary. Its NDJSON frames are NOT the
+    // codebuddy stream-json contract, so this registry entry shares only the lifecycle
+    // posture (per-turn spawn, scoped env, kill ladder) — the protocol mapping is the
+    // adapter's own, verified against the installed `opencode run --format json`.
+    contractParent: "codebuddy",
+    create: (provider: OcxProviderConfig, _context: AdapterFactoryContext) => createOpenCodeCliAdapter(provider),
   },
 } as const satisfies Record<string, AdapterDefinition>;
 

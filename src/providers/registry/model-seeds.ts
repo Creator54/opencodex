@@ -1135,3 +1135,50 @@ export const STEPFUN_MODEL_INPUT_MODALITIES: Record<string, string[]> = {
 export const STEPFUN_NO_VISION_MODELS = ["step-3.5-flash"];
 
 export const STEPFUN_REASONING_EFFORTS = ["low", "medium", "high"];
+
+/*
+ * OpenCode free-tier roster served by the `opencode-cli` route (the official
+ * `opencode` CLI as transport). Snapshot measured 2026-10-17 from
+ * `opencode models opencode --verbose` on CLI 1.19.3; the tier is anonymous, so
+ * the shapes below come from the CLI itself, not a website table. The tier is the
+ * vendor's own — this is a dated roster, not a capability model; re-probe before
+ * extending it.
+ */
+export const OPENCODE_CLI_MODELS = [
+  "beam-free",
+  "big-pickle",
+  "deepseek-v4.1-flash-free",
+  "glm-5.3-flash-free",
+  "longcat-2.5-preview-free",
+  "mimo-v2.6-flash-free",
+  "nemotron-3-ultra-free",
+  "nemotron-3.5-lightning-free",
+  "nemotron-3.5-super-vl-free",
+  "space-bunny-free",
+];
+
+export const OPENCODE_CLI_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  "beam-free": 1_048_576,
+  "big-pickle": 200_000,
+  "deepseek-v4.1-flash-free": 200_000,
+  "glm-5.3-flash-free": 200_000,
+  "longcat-2.5-preview-free": 1_000_000,
+  "mimo-v2.6-flash-free": 200_000,
+  "nemotron-3-ultra-free": 1_000_000,
+  "nemotron-3.5-lightning-free": 262_144,
+  "nemotron-3.5-super-vl-free": 1_048_576,
+  "space-bunny-free": 1_048_576,
+};
+
+export const OPENCODE_CLI_MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
+  "beam-free": 131_072,
+  "big-pickle": 32_000,
+  "deepseek-v4.1-flash-free": 32_000,
+  "glm-5.3-flash-free": 32_000,
+  "longcat-2.5-preview-free": 131_072,
+  "mimo-v2.6-flash-free": 32_000,
+  "nemotron-3-ultra-free": 128_000,
+  "nemotron-3.5-lightning-free": 262_144,
+  "nemotron-3.5-super-vl-free": 131_072,
+  "space-bunny-free": 524_288,
+};
