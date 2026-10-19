@@ -467,7 +467,7 @@ The account list marks Kiro accounts excluded from automatic selection with a re
 
 ## 3. API-key catalog
 
-opencodex ships 100 built-in presets: 83 key-based, 13 OAuth, three local, and one default
+opencodex ships 102 built-in presets: 85 key-based, 13 OAuth, three local, and one default
 ChatGPT-forward preset. The dashboard's **Add provider** picker opens a key provider's dashboard,
 validates the key, and stores it; validation is provider-specific. Notable entries:
 
@@ -667,7 +667,12 @@ keyless tier; an HTTP 200 obtained that way is a bypassed admission check rather
 permission. opencodex therefore reports the restriction instead of working around it: a request
 to `opencode-free` returns an error explaining the upstream gate and pointing here.
 
-The supported route to the same models is the keyed **`opencode-zen`** provider with an OpenCode
+The **`opencode-cli`** provider runs the official installed OpenCode CLI instead of relaying
+the keyless API. It supports text, reasoning, and client tool calls through an isolated MCP
+capture catalog. Your harness approves and executes tools; the nested CLI never runs them.
+Only one tool call is captured per turn; image input remains disabled.
+
+Another supported route to the same models is the keyed **`opencode-zen`** provider with an OpenCode
 Zen API key from [opencode.ai/auth](https://opencode.ai/auth). If OpenCode later publishes a
 supported third-party path for the keyless tier, opencodex can follow it; until then the preset
 stays as documentation of the restriction. Upstream terms:
