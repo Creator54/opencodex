@@ -19,6 +19,7 @@
  */
 import { mergeAnthropicBetaHeader } from "../../providers/anthropic-fast";
 import { applyClaudeToolPrefix, CLAUDE_CODE_SYSTEM_INSTRUCTION } from "../../oauth/anthropic";
+import { stripHarnessDocsBlock } from "./harness-scrub";
 import { credentialDomainFor, opaqueStateForDestination } from "../../protocols/opaque-state";
 import type { OcxConfig, OcxProviderConfig } from "../../types";
 import {
@@ -121,11 +122,20 @@ export function anthropicOAuthWireBody(body: Rec): { body: Rec; toolNames: Map<s
   };
   const identity = { type: "text", text: CLAUDE_CODE_SYSTEM_INSTRUCTION };
   if (typeof body.system === "string" && body.system.length > 0) {
-    out.system = [identity, { type: "text", text: body.system }];
+    out.system = [identity, { type: "text", text: stripHarnessDocsBlock(body.system) }];
   } else if (Array.isArray(body.system)) {
     const first = body.system[0];
     const present = isRec(first) && first.type === "text" && first.text === CLAUDE_CODE_SYSTEM_INSTRUCTION;
-    out.system = present ? body.system : [identity, ...body.system];
+    let scrubbed = false;
+    const blocks = body.system.map(block => {
+      if (!isRec(block) || block.type !== "text" || typeof block.text !== "string") return block;
+      const text = stripHarnessDocsBlock(block.text);
+      if (text === block.text) return block;
+      scrubbed = true;
+      return { ...block, text };
+    });
+    const kept = scrubbed ? blocks : body.system;
+    out.system = present ? kept : [identity, ...kept];
   } else {
     out.system = [identity];
   }

@@ -24,6 +24,7 @@ import { normalizeAnthropicImages } from "./anthropic-image-normalize";
 import { normalizeAnthropicOutputSchema } from "./anthropic-output-schema";
 import { stripResponsesOnlyEncryptedMarker } from "./responses-tool-schema";
 import { identifyRoutedModel } from "./identity";
+import { stripHarnessDocsBlock } from "./anthropic/harness-scrub";
 import { redactSecretString } from "../lib/redact";
 import { CLAUDE_CODE_HEADERS, claudeCodeSessionId } from "./client-fingerprint";
 import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
@@ -994,7 +995,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
         // Claude OAuth (Pro/Max) requires the first system block to be the Claude Code identity.
         body.system = [
           { type: "text", text: CLAUDE_CODE_SYSTEM_INSTRUCTION },
-          ...(system ? [{ type: "text", text: system }] : []),
+          ...(system ? [{ type: "text", text: stripHarnessDocsBlock(system) }] : []),
         ];
       } else if (system) {
         body.system = [{ type: "text", text: system }];

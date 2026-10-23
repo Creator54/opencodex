@@ -78,15 +78,15 @@ let mainHardLockRecoveryAttempt: { identity: number; credential: number; after: 
 /** Metadata-only recovery on the existing sweep; failures retain the observed policy block. */
 export async function runMainAccountHardLockRecovery(config: OcxConfig): Promise<void> {
   if (mainHardLockRecoveryInFlight) return mainHardLockRecoveryInFlight;
+  // Reconcile the owned physical credential before checking hard lock so stored quota matches observed identity.
+  reconcileMainCodexAccountRuntimeState();
+  const physical = readCodexTokens();
+  if (physical) observeMainQuotaCredential(physical.access_token, physical.account_id);
   const status = getMainAccountHardLockStatus(config);
   if (status.state !== "blocked") { mainHardLockRecoveryAttempt = undefined; return; }
   if (isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)) return;
   // A predicted reset is a scheduling hint, never proof that the hard lock can be lifted.
   if (status.resetAt !== undefined && status.resetAt > Date.now()) return;
-  // Reconcile the owned physical credential before skipping work for an older one.
-  reconcileMainCodexAccountRuntimeState();
-  const physical = readCodexTokens();
-  if (physical) observeMainQuotaCredential(physical.access_token, physical.account_id);
   const identity = captureMainAccountIdentityGeneration();
   const credential = getMainQuotaCredentialGeneration();
   const previous = mainHardLockRecoveryAttempt;
